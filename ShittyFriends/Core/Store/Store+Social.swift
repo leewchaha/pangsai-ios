@@ -35,6 +35,14 @@ public extension Store {
 
     func invite(forToken token: String) -> OutgoingInvite? { my.invites[token] }
 
+    /// Records the iCloud link of the invite card once the platform has created it.
+    func setInviteShareURL(_ token: String, _ url: String) {
+        guard var inv = my.invites[token], inv.shareURL != url else { return }
+        inv.shareURL = url
+        mutateMy { $0.invites[token] = inv }
+        emit([.save(.invite(token))])
+    }
+
     // MARK: - Friend requests (A side: someone answered my invite)
 
     /// Returns false if ignored (blocked, already a friend, duplicate).

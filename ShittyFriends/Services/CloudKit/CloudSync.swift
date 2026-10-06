@@ -158,6 +158,14 @@ final class CloudSync {
         metadata.removeZone(zone.zoneID)
     }
 
+    /// Leaves a zone someone else shared with me. Deleting a zone in the shared database removes
+    /// me as a participant; the owner's data is untouched.
+    func leaveZone(_ zone: ZoneRef) {
+        guard !zone.isMine, let e = sharedEngine else { return }
+        e.state.add(pendingDatabaseChanges: [.deleteZone(zone.zoneID)])
+        metadata.removeZone(zone.zoneID)
+    }
+
     /// Creates a zone right now (needed before a share can be saved for it).
     func createZoneNow(_ zone: ZoneRef) async throws {
         _ = try await container.privateCloudDatabase.modifyRecordZones(saving: [CKRecordZone(zoneID: zone.zoneID)], deleting: [])
@@ -226,11 +234,26 @@ final class CloudSync {
 
         case .fetchedDatabaseChanges(let e):
             var changes: [RemoteChange] = []
+            var baseZoneLost = false
             for d in e.deletions {
                 metadata.removeZone(d.zoneID)
-                changes.append(.zoneDeleted(ZoneRef(d.zoneID)))
+                let zone = ZoneRef(d.zoneID)
+                if zone.isMine && (zone.zoneName == ZoneNames.me || zone.zoneName == ZoneNames.private) {
+                    // My own base zone vanished (e.g. "Delete iCloud data" on another device).
+                    // This device still has everything: recreate and re-upload.
+                    baseZoneLost = true
+                    continue
+                }
+                changes.append(.zoneDeleted(zone))
             }
             store.apply(changes)
+            if baseZoneLost {
+                engine.state.add(pendingDatabaseChanges: [
+                    .saveZone(CKRecordZone(zoneID: ZoneRef.me.zoneID)),
+                    .saveZone(CKRecordZone(zoneID: ZoneRef.privateZone.zoneID))
+                ])
+                uploadEverythingMine()
+            }
 
         case .fetchedRecordZoneChanges(let e):
             var changes: [RemoteChange] = []

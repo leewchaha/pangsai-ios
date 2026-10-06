@@ -26,6 +26,17 @@ public struct FriendInvitePayload: Codable, Hashable, Sendable {
 
     public var color: IdentityColor { IdentityColor(rawValue: c) ?? IdentityColor.stable(for: h) }
     public var avatar: AvatarSpec { AvatarSpec(compact: a) ?? AvatarSpec() }
+
+    /// base64url(JSON) — the form stored on an invite card record.
+    public var encoded: String {
+        ((try? JSONEncoder().encode(self)) ?? Data()).base64URLEncodedString()
+    }
+
+    public static func decode(_ s: String) -> FriendInvitePayload? {
+        guard let data = Data(base64URLEncoded: s),
+              let p = try? JSONDecoder().decode(FriendInvitePayload.self, from: data), p.v == 1 else { return nil }
+        return p
+    }
 }
 
 /// Contents of a group invite: the CloudKit share URL plus a preview.

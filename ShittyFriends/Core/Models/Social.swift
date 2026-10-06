@@ -26,6 +26,9 @@ public enum ZoneNames {
     public static let me = "Me"
     /// Never shared: settings, friend links, group links, invites.
     public static let `private` = "Private"
+    /// Invite cards: one tiny record per friend invite, each shared by a public read-only link.
+    /// The link is an ordinary https iCloud URL, so it is tappable in any messenger.
+    public static let invites = "Invites"
     public static let groupPrefix = "G-"
     public static let sessionPrefix = "S-"
 
@@ -118,6 +121,8 @@ public struct OutgoingInvite: Codable, Hashable, Sendable, Identifiable {
     public var secret: String
     public var createdAt: Date
     public var expiresAt: Date
+    /// https iCloud link of the invite card that carries this invite (tappable in any messenger).
+    public var shareURL: String?
 
     public var id: String { token }
 

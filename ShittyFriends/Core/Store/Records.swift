@@ -141,6 +141,9 @@ public enum RecordTypes {
     public static let reaction = "Reaction"
     public static let party = "Party"
     public static let rsvp = "RSVP"
+    /// Root record of a friend-invite share (Invites zone). Field `payload` = base64url JSON FriendInvitePayload.
+    public static let inviteCard = "InviteCard"
+    public static let inviteCardPayloadKey = "payload"
 }
 
 /// A decoded record coming from CloudKit (any database).

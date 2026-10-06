@@ -1,0 +1,241 @@
+import XCTest
+@testable import ShittyFriends
+
+final class CoreLogicTests: XCTestCase {
+    // MARK: Records
+
+    func testRecordNamesRoundTrip() {
+        let g = ZoneRef(ownerName: "_owner", zoneName: ZoneNames.group(UUID()))
+        let mine = ZoneRef(ownerName: ZoneRef.currentUser, zoneName: ZoneNames.session(UUID()))
+        let refs: [RecordRef] = [
+            .profile, .event(UUID()), .achievement(.sevenDay), .cosmetic(.gold),
+            .settings, .friendLink(UUID()), .groupLink(UUID()), .invite("tok_123-abc"), .spaceLink(mine),
+            .groupInfo(g), .member(g, "_abc123"), .groupEvent(g, UUID()), .pwmSession(g, UUID()),
+            .participant(g, UUID(), "_xyz"), .reaction(mine, UUID()), .party(g, UUID()), .rsvp(g, UUID(), "_u1")
+        ]
+        for r in refs {
+            XCTAssertEqual(RecordRef.parse(recordName: r.recordName, zone: r.zone), r, "\(r)")
+            XCTAssertLessThan(r.recordName.count, 255)
+        }
+        XCTAssertNil(RecordRef.parse(recordName: "garbage", zone: .me))
+    }
+
+    func testZoneNames() {
+        let id = UUID()
+        XCTAssertEqual(ZoneNames.groupID(fromZoneName: ZoneNames.group(id)), id)
+        XCTAssertNil(ZoneNames.groupID(fromZoneName: ZoneNames.session(id)))
+    }
+
+    // MARK: Deep links
+
+    func testFriendInviteRoundTrip() {
+        let p = FriendInvitePayload(handle: "lee", color: .lime, avatar: AvatarSpec(shape: .blob, tone: 3, eyes: .wink, mouth: .grin, accessory: .crown), token: "tok", secret: "sec")
+        let url = DeepLinkCodec.friendURL(p)
+        XCTAssertEqual(url.scheme, "shittyfriends")
+        guard case .friendInvite(let back)? = DeepLinkCodec.parse(url) else { return XCTFail() }
+        XCTAssertEqual(back, p)
+        XCTAssertEqual(back.avatar.accessory, .crown)
+        let text = DeepLinkCodec.friendShareText(handle: "lee", url: url)
+        guard case .friendInvite(let found)? = DeepLinkCodec.find(in: "hey!! " + text + " see you") else { return XCTFail() }
+        XCTAssertEqual(found, p)
+    }
+
+    func testGroupInviteAndCloudShare() {
+        let p = GroupInvitePayload(name: "The Boys", object: .crown, color: .violet, shareURL: "https://www.icloud.com/share/0abcDEF#The_Boys")
+        guard case .groupInvite(let back)? = DeepLinkCodec.parse(DeepLinkCodec.groupURL(p)) else { return XCTFail() }
+        XCTAssertEqual(back.n, "The Boys")
+        XCTAssertEqual(back.object, .crown)
+        let share = URL(string: "https://www.icloud.com/share/0abcDEF")!
+        XCTAssertEqual(DeepLinkCodec.parse(share), .cloudShare(share))
+        XCTAssertNil(DeepLinkCodec.parse(URL(string: "https://example.com/x")!))
+    }
+
+    // MARK: Handles
+
+    func testHandleValidation() {
+        XCTAssertNil(HandleRules.validate("@Lee"))
+        XCTAssertEqual(HandleRules.normalize("  @@Lee "), "lee")
+        XCTAssertEqual(HandleRules.validate("a"), .tooShort)
+        XCTAssertEqual(HandleRules.validate("lee!"), .invalidCharacters)
+        XCTAssertEqual(HandleRules.validate(".lee"), .badDots)
+        XCTAssertEqual(HandleRules.validate("le..e"), .badDots)
+        XCTAssertEqual(HandleRules.validate(String(repeating: "x", count: 21)), .tooLong)
+        XCTAssertEqual(HandleRules.validate("h1tler"), .notAllowed)
+        XCTAssertNil(HandleRules.validate("grapefruit"))
+        XCTAssertNil(ContentFilter.cleanGroupName("  "))
+        XCTAssertEqual(ContentFilter.cleanGroupName(" The Boys "), "The Boys")
+    }
+
+    // MARK: Calendar
+
+    func testMonthGridMondayFirst() {
+        let cal = TestEnv.calendar
+        let grid = CalendarMath.monthGrid(MonthKey(year: 2026, month: 10), calendar: cal)
+        // Oct 1 2026 is a Thursday -> 3 leading blanks
+        XCTAssertNil(grid[0]); XCTAssertNil(grid[2])
+        XCTAssertEqual(grid[3], DayKey(year: 2026, month: 10, day: 1))
+        XCTAssertEqual(grid.count % 7, 0)
+        XCTAssertEqual(grid.compactMap { $0 }.count, 31)
+    }
+
+    func testStreaks() {
+        let cal = TestEnv.calendar
+        let today = DayKey(year: 2026, month: 10, day: 6)
+        var days: Set<DayKey> = []
+        for i in 1...5 { days.insert(today.adding(days: -i, calendar: cal)) }
+        var s = CalendarMath.streaks(days: days, today: today, calendar: cal)
+        XCTAssertEqual(s.current, 5, "streak alive until today ends")
+        XCTAssertEqual(s.longest, 5)
+        days.insert(today)
+        days.insert(today.adding(days: -20, calendar: cal))
+        s = CalendarMath.streaks(days: days, today: today, calendar: cal)
+        XCTAssertEqual(s.current, 6)
+        XCTAssertEqual(s.longest, 6)
+        XCTAssertEqual(CalendarMath.streaks(days: [], today: today, calendar: cal).current, 0)
+    }
+
+    func testQuietHoursAcrossMidnight() {
+        var s = AppSettings()
+        s.quietHoursEnabled = true
+        s.quietStartMinutes = 23 * 60
+        s.quietEndMinutes = 7 * 60
+        XCTAssertTrue(s.isQuiet(minutesFromMidnight: 23 * 60 + 30))
+        XCTAssertTrue(s.isQuiet(minutesFromMidnight: 3 * 60))
+        XCTAssertFalse(s.isQuiet(minutesFromMidnight: 12 * 60))
+        s.quietHoursEnabled = false
+        XCTAssertFalse(s.isQuiet(minutesFromMidnight: 3 * 60))
+    }
+
+    // MARK: Stats / achievements / highlights
+
+    func testStatsAndPlaces() {
+        let cal = TestEnv.calendar
+        let base = TestClock.date("2026-10-06T08:00:00+09:00")
+        let home = PoopLocation(latitude: 36.70, longitude: 137.21, placeName: "Home", locality: "Toyama", countryCode: "JP")
+        let tpu = PoopLocation(latitude: 36.69, longitude: 137.10, placeName: "TPU", locality: "Imizu", countryCode: "JP")
+        let events = [
+            PoopEvent(source: .timed, startedAt: base, endedAt: base.addingTimeInterval(494), location: home),
+            PoopEvent(source: .timed, startedAt: base.addingTimeInterval(5 * 3600), endedAt: base.addingTimeInterval(5 * 3600 + 291), location: tpu),
+            PoopEvent(source: .manual, startedAt: base.addingTimeInterval(8 * 3600), location: home),
+            PoopEvent(source: .timed, startedAt: base.addingTimeInterval(-86400), endedAt: base.addingTimeInterval(-86400 + 7200)) // forgotten timer
+        ]
+        let s = StatsCalculator.compute(events, now: base.addingTimeInterval(9 * 3600), calendar: cal)
+        XCTAssertEqual(s.total, 4)
+        XCTAssertEqual(s.activeDays, 2)
+        XCTAssertEqual(s.longestSession ?? 0, 494, accuracy: 0.1, "suspicious durations excluded")
+        XCTAssertEqual(s.shortestSession ?? 0, 291, accuracy: 0.1)
+        XCTAssertEqual(s.uniquePlaces, 2)
+        XCTAssertEqual(s.mostUsedPlace, "Home")
+        XCTAssertEqual(s.cities, 2)
+        XCTAssertEqual(s.currentStreak, 2)
+    }
+
+    func testAchievements() {
+        let cal = TestEnv.calendar
+        let now = TestClock.date("2026-10-30T12:00:00+09:00")
+        var events: [PoopEvent] = []
+        for d in 0..<7 {
+            events.append(PoopEvent(source: .instant, startedAt: TestClock.date("2026-10-0\(d + 1)T08:1\(d % 3):00+09:00")))
+        }
+        events.append(PoopEvent(source: .instant, startedAt: TestClock.date("2026-10-10T02:00:00+09:00")))
+        let ctx = AchievementContext(events: events, friendCount: 0, completedSocialSessions: 0, pastYesParties: [], ownedCosmetics: 1, now: now, calendar: cal)
+        let ids = Set(AchievementEngine.newlyUnlocked(ctx, already: []).map { $0.id })
+        XCTAssertTrue(ids.contains(.firstDrop))
+        XCTAssertTrue(ids.contains(.sevenDay))
+        XCTAssertTrue(ids.contains(.clockwork))
+        XCTAssertTrue(ids.contains(.nightShift))
+        XCTAssertFalse(ids.contains(.earlyBird))
+        XCTAssertFalse(ids.contains(.monthlyRegular))
+        XCTAssertFalse(ids.contains(.firstFriend))
+        XCTAssertTrue(AchievementEngine.newlyUnlocked(ctx, already: Set(AchievementID.allCases)).isEmpty)
+        XCTAssertEqual(AchievementEngine.progress(.monthlyRegular, ctx)?.current, 8)
+    }
+
+    func testNoAchievementRewardsFrequencyAlone() {
+        // 20 logs in a single day must not unlock anything beyond First Drop / time-of-day ones.
+        let cal = TestEnv.calendar
+        let base = TestClock.date("2026-10-06T10:00:00+09:00")
+        let events = (0..<20).map { PoopEvent(source: .instant, startedAt: base.addingTimeInterval(Double($0) * 600)) }
+        let ctx = AchievementContext(events: events, friendCount: 0, completedSocialSessions: 0, pastYesParties: [], ownedCosmetics: 1, now: base.addingTimeInterval(86400), calendar: cal)
+        let ids = Set(AchievementEngine.newlyUnlocked(ctx, already: []).map { $0.id })
+        XCTAssertEqual(ids, [.firstDrop])
+    }
+
+    func testHighlights() {
+        let cal = TestEnv.calendar
+        let ref = TestClock.date("2026-10-08T12:00:00+09:00")
+        let t = TestClock.date("2026-10-06T07:00:00+09:00")
+        let lee = HighlightParticipant(id: "a", handle: "lee", color: .lime, events: [
+            HighlightEvent(startedAt: t, endedAt: t.addingTimeInterval(300), source: .timed, location: nil),
+            HighlightEvent(startedAt: t.addingTimeInterval(86400), endedAt: nil, source: .instant, location: nil)
+        ])
+        let sam = HighlightParticipant(id: "b", handle: "sam", color: .electric, events: [
+            HighlightEvent(startedAt: t.addingTimeInterval(120), endedAt: nil, source: .instant, location: nil),
+            HighlightEvent(startedAt: t.addingTimeInterval(86400 + 300), endedAt: nil, source: .instant, location: nil),
+            HighlightEvent(startedAt: TestClock.date("2026-10-07T01:30:00+09:00"), endedAt: nil, source: .instant, location: nil)
+        ])
+        let cards = HighlightsEngine.cards(for: [lee, sam], period: .week, reference: ref, calendar: cal, isGroup: true)
+        let byKind = Dictionary(uniqueKeysWithValues: cards.map { ($0.kind, $0) })
+        XCTAssertEqual(byKind[.total]?.headline, "5")
+        XCTAssertEqual(byKind[.throneOccupant]?.headline, "@sam")
+        XCTAssertEqual(byKind[.poopBuddies]?.detail, "2 times within 10 min")
+        XCTAssertEqual(byKind[.nightShift]?.headline, "@sam")
+        XCTAssertEqual(byKind[.earlyBird]?.headline, "@lee")
+        XCTAssertNotNil(byKind[.speedRun])
+        XCTAssertTrue(HighlightsEngine.cards(for: [], period: .day, reference: ref, calendar: cal, isGroup: false).isEmpty)
+    }
+
+    // MARK: Notifications
+
+    func testNotificationTextPrivacy() {
+        let friend = PingDirectory.Entry(kind: .friend, title: "lee")
+        let t = NotificationTextBuilder.text(kind: .poopStart, entry: friend, senderToken: nil, payload: nil, privateMode: false, quiet: false)
+        XCTAssertEqual(t.title, "💩 @lee is pooping")
+        let p = NotificationTextBuilder.text(kind: .poopStart, entry: friend, senderToken: nil, payload: nil, privateMode: true, quiet: true)
+        XCTAssertEqual(p.title, "ShittyFriends")
+        XCTAssertEqual(p.body, "@lee checked in")
+        XCTAssertTrue(p.silent)
+        let group = PingDirectory.Entry(kind: .group, title: "The Boys", members: ["s1": "@josh"])
+        let g = NotificationTextBuilder.text(kind: .pwmInvite, entry: group, senderToken: "s1", payload: nil, privateMode: false, quiet: false)
+        XCTAssertEqual(g.title, "💩 @josh wants to poop with you")
+        XCTAssertEqual(g.category, NotificationCategory.pwmInvite)
+        let unknown = NotificationTextBuilder.text(kind: .poopInstant, entry: nil, senderToken: nil, payload: nil, privateMode: false, quiet: false)
+        XCTAssertEqual(unknown.title, "💩 A shitty friend just pooped")
+    }
+
+    func testPayloadSealing() throws {
+        let sealer = FakeSealer()
+        let key = TokenFactory.makeKeyData().base64URLEncodedString()
+        let payload = PingPayload(uid: "_abc", handle: "lee", inbox: "in", pairKey: "pk", shareURL: "https://www.icloud.com/share/x", at: Date(timeIntervalSince1970: 1000))
+        let sealed = try sealer.seal(payload, keyBase64URL: key)
+        XCTAssertEqual(try sealer.openPayload(sealed, keyBase64URL: key), payload)
+    }
+
+    func testDirectoryRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var d = PingDirectory()
+        d.entries["tok"] = PingDirectory.Entry(kind: .friend, title: "sam", key: "k")
+        d.lockScreenPrivate = true
+        try d.write(to: dir)
+        let back = PingDirectory.read(from: dir)
+        XCTAssertEqual(back?.entries["tok"]?.title, "sam")
+        XCTAssertEqual(back?.lockScreenPrivate, true)
+    }
+
+    // MARK: Map
+
+    func testMapClustering() {
+        let now = Date()
+        let pts = [
+            MapPoint(id: "1", ownerID: "a", latitude: 36.700, longitude: 137.210, label: "Home", date: now),
+            MapPoint(id: "2", ownerID: "a", latitude: 36.7001, longitude: 137.2101, label: "Home", date: now),
+            MapPoint(id: "3", ownerID: "b", latitude: 35.0, longitude: 135.0, label: "Kyoto", date: now)
+        ]
+        let zoomedOut = MapClustering.cluster(pts, latitudeDelta: 5, longitudeDelta: 5)
+        XCTAssertEqual(zoomedOut.count, 2)
+        XCTAssertEqual(zoomedOut.map { $0.count }.sorted(), [1, 2])
+        let zoomedIn = MapClustering.cluster(pts, latitudeDelta: 0.00001, longitudeDelta: 0.00001)
+        XCTAssertEqual(zoomedIn.count, 3)
+    }
+}

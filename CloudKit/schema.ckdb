@@ -1,0 +1,321 @@
+// ShittyFriends CloudKit schema (container iCloud.com.sakara.shittyfriends).
+// Import into Development with cktool (see CloudKit/README.md), then use
+// CloudKit Console > Deploy Schema Changes to push it to Production.
+DEFINE SCHEMA
+
+    RECORD TYPE Users (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        roles           LIST<INT64>,
+        GRANT WRITE TO "_creator",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Profile (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE PoopEvent (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Achievement (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Cosmetic (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Settings (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE FriendLink (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE GroupLink (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Invite (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE SpaceLink (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE GroupInfo (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Member (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE GroupEvent (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE PWMSession (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE PWMParticipant (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Reaction (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE Party (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Private/shared databases. Whole model is JSON in `json`; adding model fields never needs a schema change.
+    RECORD TYPE RSVP (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        json            BYTES,
+        schemaVersion   INT64,
+        updatedAt       TIMESTAMP,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Friend invite card (root of a public read-only record share). Holds only the invite payload.
+    RECORD TYPE InviteCard (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        payload         STRING,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    // Public database: anonymous pings. `to` is a random inbox token; `ref` is AES-GCM sealed.
+    // Query subscriptions filter on `to` and `kind`, so both must be QUERYABLE.
+    RECORD TYPE Ping (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        exp             TIMESTAMP QUERYABLE SORTABLE,
+        "from"          STRING,
+        kind            STRING QUERYABLE,
+        ref             STRING,
+        "to"            STRING QUERYABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );

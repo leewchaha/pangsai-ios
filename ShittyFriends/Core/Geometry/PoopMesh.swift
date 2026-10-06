@@ -104,6 +104,20 @@ public struct MeshData: Sendable {
     }
 }
 
+/// Surface-measured placement for the cartoon face.
+public struct FaceLayout: Hashable, Sendable {
+    public var eyeY: Double
+    /// Surface z at the eye positions (eye centers sit slightly behind this so they bulge out).
+    public var eyeZ: Double
+    public var eyeSpacing: Double
+    public var eyeRadius: Double
+    public var mouthY: Double
+    /// Surface z straight below the eyes at mouth height.
+    public var mouthZ: Double
+    public var mouthWidth: Double
+    public var top: Double
+}
+
 public enum PoopMesh {
     struct V3 {
         var x: Double, y: Double, z: Double
@@ -243,12 +257,38 @@ public enum PoopMesh {
         return v * c + k.cross(v) * s + k * (k.dot(v) * (1 - c))
     }
 
-    /// Where to put the eyes: on the front (+z) of the middle tier.
-    public static func faceAnchor(_ s: PoopShape = .classic) -> (y: Double, z: Double, spacing: Double, eyeRadius: Double) {
+    /// Where the face goes. Measured on the actual surface so the eyes sit on the coil and the
+    /// mouth lands on the bulge of the coil below them (never buried, never floating).
+    public static func faceLayout(_ s: PoopShape = .classic) -> FaceLayout {
         let mesh = make(s.lowPoly)
         let b = mesh.bounds
         let height = Double(b.max.1 - b.min.1)
-        let front = Double(b.max.2)
-        return (y: height * 0.5, z: front * 0.82, spacing: s.baseRadius * 0.36, eyeRadius: s.tubeRadius * 0.34)
+        /// Max z of the surface near (x, y).
+        func frontZ(x: Double, y: Double, dx: Double = 0.04, dy: Double = 0.025) -> Double? {
+            var best: Double?
+            var i = 0
+            while i + 2 < mesh.positions.count {
+                let px = Double(mesh.positions[i]), py = Double(mesh.positions[i + 1]), pz = Double(mesh.positions[i + 2])
+                if abs(px - x) <= dx && abs(py - y) <= dy { best = max(best ?? -.infinity, pz) }
+                i += 3
+            }
+            return best
+        }
+        let spacing = s.baseRadius * 0.36
+        let eyeRadius = s.tubeRadius * 0.34
+        let eyeY = height * 0.52
+        let eyeZ = min(frontZ(x: -spacing, y: eyeY) ?? Double(b.max.2), frontZ(x: spacing, y: eyeY) ?? Double(b.max.2))
+        // Mouth: the most forward point straight below the eyes, i.e. the equator of that coil.
+        var mouthY = eyeY - eyeRadius * 2.2
+        var mouthZ = frontZ(x: 0, y: mouthY) ?? eyeZ
+        var y = eyeY - eyeRadius * 1.6
+        while y >= max(0.08, eyeY - 0.42) {
+            if let z = frontZ(x: 0, y: y), z > mouthZ + 0.004 {
+                mouthZ = z
+                mouthY = y
+            }
+            y -= 0.01
+        }
+        return FaceLayout(eyeY: eyeY, eyeZ: eyeZ, eyeSpacing: spacing, eyeRadius: eyeRadius, mouthY: mouthY, mouthZ: mouthZ, mouthWidth: spacing * 1.6, top: height)
     }
 }

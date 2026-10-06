@@ -112,7 +112,7 @@ final class RenderCache {
         let device = self.device
         queue.async {
             let node = subject.build()
-            node.eulerAngles.y = -0.35
+            node.eulerAngles.y = 0.25
             let (scene, camera) = Stage.make(subject: node)
             let renderer = SCNRenderer(device: device, options: nil)
             renderer.scene = scene

@@ -1,0 +1,142 @@
+# Codemagic workflows for ShittyFriends (native iOS, XcodeGen).
+#
+#   ios-check        Build + unit tests on the simulator. No signing, no secrets. Run this first and
+#                    paste the log back if anything fails.
+#   ios-testflight   Signed App Store build, uploaded to TestFlight. Creates/fetches provisioning
+#                    profiles for the app AND the notification extension automatically.
+#   cloudkit-schema  Imports CloudKit/schema.ckdb into the Development environment with cktool.
+#
+# Secrets live in Codemagic environment variable groups (Team or App settings > Environment variables),
+# never in this repo. See docs/SETUP.md for exactly what goes in each group.
+
+definitions:
+  scripts:
+    - &install_xcodegen
+      name: Install XcodeGen
+      script: |
+        if ! command -v xcodegen >/dev/null 2>&1; then
+          brew install xcodegen
+        fi
+        xcodegen --version
+    - &generate_project
+      name: Generate Xcode project
+      script: xcodegen generate
+
+workflows:
+  ios-check:
+    name: ShittyFriends · build check (simulator)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+    scripts:
+      - *install_xcodegen
+      - *generate_project
+      - name: Build and run unit tests on a simulator
+        script: |
+          SIM_ID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          ids = [d["udid"] for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")]
+          print(ids[-1] if ids else "")
+          ')
+          echo "Simulator: $SIM_ID"
+          LOG="$CM_BUILD_DIR/xcodebuild.log"
+          set +e
+          xcodebuild \
+            -project ShittyFriends.xcodeproj \
+            -scheme ShittyFriends \
+            -destination "id=$SIM_ID" \
+            -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            test > "$LOG" 2>&1
+          STATUS=$?
+          set -e
+          grep -E "Test Suite .* (passed|failed)|Executed [0-9]+ test|\*\* (BUILD|TEST)" "$LOG" | tail -20 || true
+          if [ "$STATUS" != "0" ]; then
+            echo "================ ERRORS (paste these to Claude) ================"
+            grep -E "error:|failed \(" "$LOG" | sort -u | head -200
+            exit "$STATUS"
+          fi
+    artifacts:
+      - xcodebuild.log
+
+  ios-testflight:
+    name: ShittyFriends · TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 90
+    environment:
+      xcode: latest
+      groups:
+        # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER,
+        # APP_STORE_CONNECT_PRIVATE_KEY, CERTIFICATE_PRIVATE_KEY
+        - appstore_credentials
+      vars:
+        BUNDLE_ID: com.sakara.shittyfriends
+        NSE_BUNDLE_ID: com.sakara.shittyfriends.NotificationService
+        APP_STORE_APPLE_ID: 6819505355
+        XCODE_PROJECT: ShittyFriends.xcodeproj
+        XCODE_SCHEME: ShittyFriends
+    scripts:
+      - *install_xcodegen
+      - *generate_project
+      - name: Set up keychain
+        script: keychain initialize
+      - name: Fetch or create signing files (app + notification extension)
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --create
+      - name: Add certificates to keychain
+        script: keychain add-certificates
+      - name: Apply profiles to the Xcode project
+        script: xcode-project use-profiles
+      - name: Set build number
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
+          case "$LATEST" in ''|*[!0-9]*) LATEST=0 ;; esac
+          NEXT=$((LATEST + 1))
+          echo "Build number: $NEXT"
+          agvtool new-version -all "$NEXT"
+      - name: Build signed .ipa
+        script: |
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
+        submit_to_app_store: false
+
+  cloudkit-schema:
+    name: ShittyFriends · CloudKit schema → Development
+    instance_type: mac_mini_m2
+    max_build_duration: 15
+    environment:
+      xcode: latest
+      groups:
+        # CLOUDKIT_MANAGEMENT_TOKEN (CloudKit Console > Settings > Tokens) and TEAM_ID (10 characters)
+        - cloudkit
+      vars:
+        CONTAINER_ID: iCloud.com.sakara.shittyfriends
+    scripts:
+      - name: Validate and import schema into Development
+        script: |
+          set -e
+          xcrun cktool validate-schema \
+            --team-id "$TEAM_ID" \
+            --container-id "$CONTAINER_ID" \
+            --environment development \
+            --file CloudKit/schema.ckdb
+          xcrun cktool import-schema \
+            --team-id "$TEAM_ID" \
+            --container-id "$CONTAINER_ID" \
+            --environment development \
+            --file CloudKit/schema.ckdb
+          echo "Imported. Now open CloudKit Console > Schema > Deploy Schema Changes to push it to Production."

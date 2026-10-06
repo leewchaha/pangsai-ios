@@ -127,6 +127,15 @@ public final class Store {
         emit([.save(.profile)])
     }
 
+    /// Onboarding: store the profile so invites can use it, without finishing onboarding yet.
+    public func saveProfileDraft(handle: String, avatar: AvatarSpec, color: IdentityColor) {
+        let now = clock()
+        mutateMy {
+            $0.profile = UserProfile(handle: HandleRules.normalize(handle), avatar: avatar, color: color, equippedCosmetic: $0.profile?.equippedCosmetic ?? .classic, createdAt: $0.profile?.createdAt ?? now, updatedAt: now)
+        }
+        emit([.save(.profile)])
+    }
+
     public func updateProfile(handle: String? = nil, avatar: AvatarSpec? = nil, color: IdentityColor? = nil) {
         guard var p = my.profile else { return }
         if let h = handle { p.handle = HandleRules.normalize(h) }

@@ -103,10 +103,9 @@ final class AppModel {
         let dir = CloudConfig.localDirectory
         persistence = FilePersistence(directory: dir)
         store = Store(my: persistence.loadMy(), cache: persistence.loadCache())
-        let container = CloudConfig.container
-        cloud = CloudSync(container: container, store: store, directory: dir)
-        shares = ShareService(container: container, cloud: cloud, store: store)
-        pings = PingService(container: container, store: store, directory: dir)
+        cloud = CloudSync(store: store, directory: dir)
+        shares = ShareService(cloud: cloud, store: store)
+        pings = PingService(store: store, directory: dir)
         notifications = NotificationManager()
         location = LocationService()
 

@@ -27,13 +27,12 @@ final class ShareService {
         }
     }
 
-    let container: CKContainer
+    var container: CKContainer { CloudConfig.container }
     let cloud: CloudSync
     let store: Store
     private var meShare: CKShare?
 
-    init(container: CKContainer, cloud: CloudSync, store: Store) {
-        self.container = container
+    init(cloud: CloudSync, store: Store) {
         self.cloud = cloud
         self.store = store
     }

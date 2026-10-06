@@ -4,7 +4,7 @@ import UIKit
 /// Builds 3D poops: procedural swirl body (from Core's PoopMesh), cute face, cosmetic extras.
 enum PoopFactory {
     private static var geometryCache: [String: SCNGeometry] = [:]
-    private static var anchorCache: [String: (y: Double, z: Double, spacing: Double, eyeRadius: Double, top: Double)] = [:]
+    private static var layoutCache: [String: FaceLayout] = [:]
     private static let lock = NSLock()
 
     static func shape(for id: CosmeticID) -> PoopShape {
@@ -38,18 +38,16 @@ enum PoopFactory {
         return g
     }
 
-    private static func anchor(_ shape: PoopShape) -> (y: Double, z: Double, spacing: Double, eyeRadius: Double, top: Double) {
+    private static func layout(_ shape: PoopShape) -> FaceLayout {
         let key = "\(shape.hashValue)"
         lock.lock()
-        if let a = anchorCache[key] { lock.unlock(); return a }
+        if let l = layoutCache[key] { lock.unlock(); return l }
         lock.unlock()
-        let f = PoopMesh.faceAnchor(shape)
-        let b = PoopMesh.make(shape.lowPoly).bounds
-        let a = (y: f.y, z: f.z, spacing: f.spacing, eyeRadius: f.eyeRadius, top: Double(b.max.1))
+        let l = PoopMesh.faceLayout(shape)
         lock.lock()
-        anchorCache[key] = a
+        layoutCache[key] = l
         lock.unlock()
-        return a
+        return l
     }
 
     /// A complete poop. The node's origin is at the bottom center; it is ~1.1 units tall.
@@ -63,20 +61,20 @@ enum PoopFactory {
         let body = SCNNode(geometry: geo)
         body.name = "body"
         root.addChildNode(body)
-        let a = anchor(shape)
-        if face { root.addChildNode(faceNode(a, angry: id == .devil, halo: id == .angel)) }
-        addExtras(id, to: root, top: a.top)
+        let f = layout(shape)
+        if face { root.addChildNode(faceNode(f, angry: id == .devil)) }
+        addExtras(id, to: root, top: f.top)
         return root
     }
 
-    private static func faceNode(_ a: (y: Double, z: Double, spacing: Double, eyeRadius: Double, top: Double), angry: Bool, halo: Bool) -> SCNNode {
+    private static func faceNode(_ f: FaceLayout, angry: Bool) -> SCNNode {
         let face = SCNNode()
         face.name = "face"
-        let r = CGFloat(a.eyeRadius) * 1.25
+        let r = CGFloat(f.eyeRadius) * 1.25
         for side in [-1.0, 1.0] {
             let eye = SCNNode(geometry: SCNSphere(radius: r))
             eye.geometry?.materials = [Materials.eyeWhite]
-            eye.position = SCNVector3(Float(side * a.spacing), Float(a.y + 0.04), Float(a.z))
+            eye.position = SCNVector3(Float(side * f.eyeSpacing), Float(f.eyeY + 0.04), Float(f.eyeZ - Double(r) * 0.2))
             eye.scale = SCNVector3(1, 1.15, 0.7)
             let pupil = SCNNode(geometry: SCNSphere(radius: r * 0.55))
             pupil.geometry?.materials = [Materials.ink]
@@ -95,8 +93,8 @@ enum PoopFactory {
             }
             face.addChildNode(eye)
         }
-        // Smile: a crescent extruded from a bezier path.
-        let w: CGFloat = CGFloat(a.spacing) * 1.6
+        // Smile: a crescent extruded from a bezier path, sitting on the coil below the eyes.
+        let w = CGFloat(f.mouthWidth)
         let path = UIBezierPath()
         path.move(to: CGPoint(x: -w / 2, y: 0))
         path.addQuadCurve(to: CGPoint(x: w / 2, y: 0), controlPoint: CGPoint(x: 0, y: -w * 0.75))
@@ -106,8 +104,8 @@ enum PoopFactory {
         let mouthShape = SCNShape(path: path, extrusionDepth: 0.04)
         mouthShape.materials = [Materials.ink]
         let mouth = SCNNode(geometry: mouthShape)
-        mouth.position = SCNVector3(0, Float(a.y - a.eyeRadius * 1.6), Float(a.z + 0.02))
-        mouth.eulerAngles.x = -0.18
+        // SCNShape extrudes symmetrically around z = 0, so its front face sits 0.02 in front of the node.
+        mouth.position = SCNVector3(0, Float(f.mouthY + Double(w) * 0.25), Float(f.mouthZ - 0.002))
         face.addChildNode(mouth)
         return face
     }

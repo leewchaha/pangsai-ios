@@ -29,7 +29,7 @@ enum CloudAvailability: Equatable {
 /// and one for the shared database (friends' Me zones, groups and sessions others own).
 @MainActor
 final class CloudSync {
-    let container: CKContainer
+    var container: CKContainer { CloudConfig.container }
     let store: Store
     let metadata: RecordMetadataStore
     private(set) var availability: CloudAvailability = .unknown
@@ -42,8 +42,7 @@ final class CloudSync {
     private var sharedDelegate: EngineDelegate?
     private let stateDirectory: URL
 
-    init(container: CKContainer, store: Store, directory: URL) {
-        self.container = container
+    init(store: Store, directory: URL) {
         self.store = store
         self.stateDirectory = directory
         self.metadata = RecordMetadataStore(directory: directory)
@@ -53,6 +52,10 @@ final class CloudSync {
 
     /// Checks the iCloud account, learns my user record name, and starts both engines.
     func start() async {
+        if CloudConfig.isRunningUnitTests {
+            setAvailability(.error("Disabled while running unit tests"))
+            return
+        }
         do {
             let status = try await container.accountStatus()
             switch status {

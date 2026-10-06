@@ -11,7 +11,7 @@ private let log = Logger(subsystem: "com.sakara.shittyfriends", category: "pings
 /// Senders delete their pings when they expire or become stale (DONE / delete).
 @MainActor
 final class PingService {
-    let container: CKContainer
+    var container: CKContainer { CloudConfig.container }
     let store: Store
     private let sealer = AESSealer()
     private let fileURL: URL
@@ -34,8 +34,7 @@ final class PingService {
         var subscriptionsSavedAt: Date?
     }
 
-    init(container: CKContainer, store: Store, directory: URL) {
-        self.container = container
+    init(store: Store, directory: URL) {
         self.store = store
         self.fileURL = directory.appendingPathComponent("pings.json")
         if let data = try? Data(contentsOf: fileURL), let s = try? JSONDecoder().decode(State.self, from: data) {

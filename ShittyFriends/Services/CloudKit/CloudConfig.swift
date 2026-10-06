@@ -7,7 +7,14 @@ enum CloudConfig {
     /// Must match the App Group in both targets' entitlements.
     static let appGroup = "group.com.sakara.shittyfriends"
 
-    static var container: CKContainer { CKContainer(identifier: containerIdentifier) }
+    /// Created on first use only. Creating a CKContainer without the iCloud entitlement throws an
+    /// Objective-C exception, so nothing may touch this during unsigned simulator unit tests.
+    static let container = CKContainer(identifier: containerIdentifier)
+
+    /// True while the app is hosting XCTest (unsigned simulator builds have no iCloud entitlement).
+    static var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil
+    }
 
     /// Shared container directory used to hand the ping directory to the Notification Service Extension.
     static var appGroupDirectory: URL? {

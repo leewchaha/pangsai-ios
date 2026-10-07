@@ -96,6 +96,8 @@ final class AppModel {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var sendTask: Task<Void, Never>?
     @ObservationIgnored var processing = false
+    /// True while "Delete all my data" runs (so our own zone deletions aren't treated as remote ones).
+    @ObservationIgnored var isDeletingAll = false
     @ObservationIgnored private var pollTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var startTask: Task<Void, Never>?
 
@@ -113,6 +115,7 @@ final class AppModel {
         store.effectHandler = { [weak self] effect in self?.handle(effect) }
         cloud.onAvailabilityChange = { [weak self] a in self?.availability = a }
         cloud.onRemoteChangesApplied = { [weak self] in self?.pings.writeDirectory() }
+        cloud.onMyDataDeletedRemotely = { [weak self] in self?.wipeAfterRemoteDeletion() }
     }
 
     // MARK: - Lifecycle
@@ -131,9 +134,8 @@ final class AppModel {
     private func performStart() async {
         notifications.registerCategories()
         await notifications.refreshAuthorization()
-        if notifications.authorization == .authorized || notifications.authorization == .provisional {
-            UIApplication.shared.registerForRemoteNotifications()
-        }
+        // Always register: iCloud sync relies on silent pushes, which need no alert permission.
+        UIApplication.shared.registerForRemoteNotifications()
         await cloud.start()
         afterCloudStart()
     }
@@ -160,7 +162,18 @@ final class AppModel {
         pings.cleanupExpired()
         cleanupSpaces()
         await cloud.fetchAll()
+        store.repairMyGroupRecords()
         await processIncomingPings()
+        await reconcileHistoryShareIfDue()
+    }
+
+    /// At most every 10 minutes: make sure only current friends can read my history.
+    private func reconcileHistoryShareIfDue() async {
+        let key = "sf.historyShareReconciledAt"
+        if let last = UserDefaults.standard.object(forKey: key) as? Date, Date().timeIntervalSince(last) < 600 { return }
+        let allowed = Set(store.my.friendLinks.values.compactMap(\.userID))
+        await shares.reconcileHistoryShare(allowed: allowed)
+        UserDefaults.standard.set(Date(), forKey: key)
     }
 
     func enteredForeground() {
@@ -254,6 +267,28 @@ final class AppModel {
             cloud.ensureZone(zone)
         case .haptic(let kind):
             Haptics.play(kind)
+        }
+    }
+
+    // MARK: - Presentation
+
+    /// SwiftUI can't present a cover or sheet while another one is still animating away. Use this when
+    /// the same tap closes a sheet and opens something else.
+    func afterDismissal(_ action: @escaping @MainActor (AppModel) -> Void) {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard let self else { return }
+            action(self)
+        }
+    }
+
+    /// Opens the live session cover, waiting for a closing sheet first when needed.
+    func presentSession(afterDismissal waits: Bool = false) {
+        if waits || sheet != nil {
+            sheet = nil
+            afterDismissal { $0.showSession = true }
+        } else {
+            showSession = true
         }
     }
 

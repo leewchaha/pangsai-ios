@@ -117,9 +117,10 @@ public enum PointsEngine {
         events.reduce(0) { $0 + $1.halfPoints } / 2
     }
 
-    /// Half-points already earned on the local day of `date`.
+    /// Half-points already earned on the local day of `date`. Uses each event's `createdAt` (when the
+    /// session actually happened on this device), which the user can't edit.
     public static func dailyHalfPoints(events: [PoopEvent], on date: Date, calendar: Calendar) -> Int {
         let day = DayKey(date, calendar: calendar)
-        return events.filter { DayKey($0.startedAt, calendar: calendar) == day }.reduce(0) { $0 + $1.halfPoints }
+        return events.filter { DayKey($0.createdAt, calendar: calendar) == day }.reduce(0) { $0 + $1.halfPoints }
     }
 }

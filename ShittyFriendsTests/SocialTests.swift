@@ -157,17 +157,22 @@ final class SocialTests: XCTestCase {
         XCTAssertEqual(after["_b"], "@lee")
     }
 
-    func testGroupJoinBackfillAndLeaderboard() {
+    func testGroupJoinDoesNotExposeOlderHistoryAndLeaderboard() {
         let clock = TestClock()
         let (store, log) = TestEnv.store(clock: clock)
         store.logInstant()
         clock.advance(60)
-        store.logInstant()
         let zone = ZoneRef(ownerName: "_josh", zoneName: ZoneNames.group(UUID()))
         let gid = ZoneNames.groupID(fromZoneName: zone.zoneName)!
         log.effects.removeAll()
         store.registerJoinedGroup(zone: zone, groupID: gid, name: "Class", shareURL: nil)
-        XCTAssertEqual(log.saves.filter { if case .groupEvent = $0 { return true } else { return false } }.count, 2)
+        XCTAssertTrue(log.saves.filter { if case .groupEvent = $0 { return true } else { return false } }.isEmpty,
+                      "group membership is not personal-history access: nothing before joining is mirrored")
+        clock.advance(60)
+        store.logInstant()
+        clock.advance(60)
+        store.logInstant()
+        XCTAssertEqual(store.cache.zones[zone]?.events.count, 2)
         store.apply([.upsert(.member(GroupMember(person: josh, inbox: "jx", role: .owner, joinedAt: clock.now.addingTimeInterval(-999))), zone: zone)])
         let board = store.leaderboard(zone)
         XCTAssertEqual(board.first?.member.id, "_me")

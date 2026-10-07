@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - Friends list
 
@@ -174,7 +175,7 @@ struct AddFriendsView: View {
                         Button {
                             if let text = UIPasteboard.general.string {
                                 dismiss()
-                                model.handle(text: text)
+                                model.afterDismissal { $0.handle(text: text) }
                             } else {
                                 model.info("CLIPBOARD EMPTY", "Copy their invite message first.")
                             }
@@ -207,7 +208,7 @@ struct AddFriendsView: View {
                     QRScannerView { text in
                         scanning = false
                         dismiss()
-                        model.handle(text: text)
+                        model.afterDismissal { $0.handle(text: text) }
                     }
                     .ignoresSafeArea()
                     Text("SCAN A SHITTYFRIENDS QR")

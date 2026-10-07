@@ -298,7 +298,7 @@ struct PWMInviteView: View {
                 Spacer()
                 Button("JOIN 💩") {
                     dismiss()
-                    model.joinPWM(sessionID)
+                    model.joinPWM(sessionID, afterDismissal: true)
                 }
                 .buttonStyle(.sticker(Palette.sun, height: 70))
                 Button("NOT NOW") {

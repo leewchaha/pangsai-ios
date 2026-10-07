@@ -236,8 +236,10 @@ struct OnboardingInviteBlock: View {
                 ProgressView().tint(Palette.inkFixed).frame(height: 150)
             }
         }
-        .task {
-            guard model.availability.isAvailable else { return }
+        .task(id: model.availability) {
+            // Re-runs when the iCloud check finishes, so the QR appears without leaving the step.
+            guard model.availability.isAvailable, url == nil else { return }
+            failed = false
             do { url = try await model.friendInviteURL() } catch { failed = true }
         }
     }

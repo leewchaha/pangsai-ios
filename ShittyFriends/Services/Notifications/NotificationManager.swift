@@ -60,8 +60,9 @@ final class NotificationManager {
         settings.isQuiet(minutesFromMidnight: CalendarMath.minutesFromMidnight(date, calendar: CalendarMath.standard()))
     }
 
-    private func add(id: String, title: String, body: String, at date: Date, category: String, userInfo: [String: Any] = [:], settings: AppSettings) {
-        guard date > Date() else { return }
+    private func add(id: String, title: String, body: String, at date: Date?, category: String, userInfo: [String: Any] = [:], settings: AppSettings) {
+        if let date, date <= Date() { return }
+        let date = date ?? Date()
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -72,8 +73,15 @@ final class NotificationManager {
         } else {
             content.sound = .default
         }
-        let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-        let request = UNNotificationRequest(identifier: id, content: content, trigger: UNCalendarNotificationTrigger(dateMatching: comps, repeats: false))
+        let trigger: UNNotificationTrigger
+        if date.timeIntervalSinceNow < 60 {
+            // "Now"-ish: an interval trigger can't miss its second the way a calendar match can.
+            trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, date.timeIntervalSinceNow), repeats: false)
+        } else {
+            let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+            trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+        }
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
         center.add(request) { error in
             if let error { log.error("schedule \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)") }
         }
@@ -130,7 +138,7 @@ final class NotificationManager {
 
     /// In-app event worth a banner when the app is in the background (e.g. achievement while backgrounded).
     func notifyNow(title: String, body: String, settings: AppSettings) {
-        add(id: "now-" + UUID().uuidString, title: title, body: body, at: Date().addingTimeInterval(1), category: NotificationCategory.general, settings: settings)
+        add(id: "now-" + UUID().uuidString, title: title, body: body, at: nil, category: NotificationCategory.general, settings: settings)
     }
 
     func clearAll() {

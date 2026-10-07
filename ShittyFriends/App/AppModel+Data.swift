@@ -29,7 +29,12 @@ extension AppModel {
     /// groups I own, invites), my pings, and my membership in other people's zones.
     func deleteAllMyData() async {
         busy = "Deleting…"
-        defer { busy = nil }
+        isDeletingAll = true
+        defer {
+            busy = nil
+            isDeletingAll = false
+        }
+        let userID = store.userID
         // Leave zones others shared with me and revoke what I shared.
         for link in store.my.friendLinks.values {
             if let uid = link.userID { shares.leave(ZoneRef(ownerName: uid, zoneName: ZoneNames.me)) }
@@ -50,13 +55,33 @@ extension AppModel {
         shares.deleteOwned(ZoneRef(ownerName: ZoneRef.currentUser, zoneName: ZoneNames.invites))
         await cloud.sendAll()
         pings.cleanupExpired(now: .distantFuture)
+        await pings.deleteAllSubscriptions()
+        wipeLocal(keepingUserID: userID)
+        log.info("all data deleted")
+    }
+
+    /// Another device deleted my iCloud data (or the user removed it in Settings): match it here.
+    func wipeAfterRemoteDeletion() {
+        guard !isDeletingAll else { return }
+        log.info("my zones were deleted elsewhere; wiping local copy")
+        let userID = store.userID
+        Task { await pings.deleteAllSubscriptions() }
+        wipeLocal(keepingUserID: userID)
+        showSession = false
+        sheet = nil
+        info("DATA DELETED", "Your ShittyFriends data was deleted from iCloud.")
+    }
+
+    /// Clears everything on this device but stays signed in to the same iCloud account,
+    /// so the app keeps working (onboarding starts again) without a relaunch.
+    private func wipeLocal(keepingUserID userID: UserID?) {
         pings.reset()
         notifications.clearAll()
         store.resetForAccountChange(keepOnboarding: false)
         persistence.wipe()
-        cloud.metadata.removeAll()
-        saveNow()
+        cloud.resetLocalSyncState()
         UserDefaults.standard.removeObject(forKey: "sf.initialUploadDone")
-        log.info("all data deleted")
+        if let userID { store.setUserID(userID) }
+        saveNow()
     }
 }

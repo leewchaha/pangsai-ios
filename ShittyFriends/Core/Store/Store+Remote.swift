@@ -10,7 +10,18 @@ public extension Store {
         var directoryChanged = false
 
         for change in changes {
+            var change = change
+            if case .upsertFrom(let record, let zone, let writer) = change {
+                if isSharedSpace(zone), !isAllowedWriter(writer, of: record, in: zone) {
+                    // Forged or tampered record: ignore it, and put mine back if it was about me.
+                    effects += repairEffects(for: record, in: zone)
+                    continue
+                }
+                change = .upsert(record, zone: zone)
+            }
             switch change {
+            case .upsertFrom:
+                break
             case .upsert(let record, let zone):
                 if zone.isMine && (zone.zoneName == ZoneNames.me || zone.zoneName == ZoneNames.private) {
                     linksChanged = applyMine(record) || linksChanged
@@ -107,6 +118,108 @@ public extension Store {
                 emit([.refreshDirectory])
             }
         }
+    }
+
+    // MARK: - Write authority (group / session zones)
+
+    /// Group and Poop With Me / party zones (not anyone's Me or Private zone).
+    internal func isSharedSpace(_ zone: ZoneRef) -> Bool {
+        zone.zoneName != ZoneNames.me && zone.zoneName != ZoneNames.private
+    }
+
+    /// Who may write each record type in a shared space:
+    /// - group info: the zone owner
+    /// - member: that member (or the zone owner); only the zone owner can be `.owner`
+    /// - poop copy, reaction: its owner / sender
+    /// - session, party: the creator (a session can also be ended by anyone taking part)
+    /// - participant, RSVP: that person, or the creator inviting them
+    internal func isAllowedWriter(_ writer: UserID, of record: RemoteRecord, in zone: ZoneRef) -> Bool {
+        let owner: UserID? = zone.isMine ? my.userID : zone.ownerName
+        let z = cache.zones[zone]
+        switch record {
+        case .groupInfo:
+            return writer == owner
+        case .member(let m):
+            if m.role == .owner && m.id != owner { return false }
+            return writer == m.id || writer == owner
+        case .groupEvent(let e):
+            return writer == e.ownerID
+        case .reaction(let r):
+            return writer == r.senderID
+        case .pwmSession(let s):
+            if let existing = z?.sessions[s.id], existing.creatorID != s.creatorID { return false }
+            if writer == s.creatorID { return true }
+            // Others may only mark it ended.
+            return s.state == .ended && (z?.participants[s.id]?[writer] != nil || z?.members[writer] != nil)
+        case .participant(let p):
+            if writer == p.id { return true }
+            guard p.status == .invited, p.startedAt == nil else { return false }
+            if let s = z?.sessions[p.sessionID] { return writer == s.creatorID }
+            return true // session not fetched yet; an invite placeholder is harmless
+        case .party(let p):
+            if let existing = z?.parties[p.id], existing.creatorID != p.creatorID { return false }
+            return writer == p.creatorID
+        case .rsvp(let r):
+            if writer == r.id { return true }
+            guard r.response == .maybe, r.joinedAt == nil else { return false }
+            if let p = z?.parties[r.partyID] { return writer == p.creatorID }
+            return true
+        default:
+            return true
+        }
+    }
+
+    /// After rejecting a forged record: if it impersonated one of mine, re-save my real copy
+    /// (or delete the fake when I have no such record).
+    internal func repairEffects(for record: RemoteRecord, in zone: ZoneRef) -> [Effect] {
+        guard let uid = my.userID else { return [] }
+        let z = cache.zones[zone]
+        switch record {
+        case .groupInfo:
+            return zone.isMine && z?.group != nil ? [.save(.groupInfo(zone))] : []
+        case .member(let m) where m.id == uid:
+            return z?.members[uid] != nil ? [.save(.member(zone, uid))] : []
+        case .groupEvent(let e) where e.ownerID == uid:
+            return z?.events[e.id] != nil ? [.save(.groupEvent(zone, e.id))] : [.delete(.groupEvent(zone, e.id))]
+        case .reaction(let r) where r.senderID == uid:
+            return z?.reactions[r.id] != nil ? [.save(.reaction(zone, r.id))] : [.delete(.reaction(zone, r.id))]
+        case .participant(let p) where p.id == uid:
+            return z?.participants[p.sessionID]?[uid] != nil ? [.save(.participant(zone, p.sessionID, uid))] : []
+        case .rsvp(let r) where r.id == uid:
+            return z?.rsvps[r.partyID]?[uid] != nil ? [.save(.rsvp(zone, r.partyID, uid))] : []
+        case .pwmSession(let s):
+            if let mine = z?.sessions[s.id], mine.creatorID == uid { return [.save(.pwmSession(zone, s.id))] }
+            return []
+        case .party(let p):
+            if let mine = z?.parties[p.id], mine.creatorID == uid { return [.save(.party(zone, p.id))] }
+            return []
+        default:
+            return []
+        }
+    }
+
+    /// Run after a full fetch (both databases converged): puts back my member record and my poop
+    /// copies in groups if someone deleted them. Done here, not on each delete, so my own deletes
+    /// from another device (which can arrive in any order) are never undone.
+    func repairMyGroupRecords() {
+        guard let uid = my.userID else { return }
+        var effects: [Effect] = []
+        for link in my.groupLinks.values {
+            guard let z = cache.zones[link.zone], z.group != nil else { continue }
+            if z.members[uid] == nil {
+                let role: GroupRole = link.isOwner ? .owner : .member
+                let member = GroupMember(person: meRef, inbox: link.myInbox, role: role, joinedAt: link.joinedAt, updatedAt: clock())
+                mutateCache { $0.zones[link.zone]?.members[uid] = member }
+                effects.append(.save(.member(link.zone, uid)))
+            }
+            guard link.shareEvents else { continue }
+            for e in my.events.values where e.sharedToGroups && e.startedAt >= link.joinedAt && z.events[e.id] == nil {
+                let ge = GroupEvent(event: e, ownerID: uid, includeLocation: link.shareLocations)
+                mutateCache { $0.zones[link.zone]?.events[e.id] = ge }
+                effects.append(.save(.groupEvent(link.zone, e.id)))
+            }
+        }
+        if !effects.isEmpty { emit(effects + [.refreshDirectory]) }
     }
 
     // MARK: - Group / session zones

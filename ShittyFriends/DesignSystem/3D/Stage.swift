@@ -96,7 +96,7 @@ final class RenderCache {
     }
 
     /// Renders at a fixed 3x of a 160pt square; views scale it down.
-    static let pixelSize = CGSize(width: 480, height: 480)
+    nonisolated static let pixelSize = CGSize(width: 480, height: 480)
 
     func image(_ subject: Subject) -> UIImage? {
         let key = subject.key

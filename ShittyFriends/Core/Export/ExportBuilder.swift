@@ -242,7 +242,8 @@ public enum ExportBuilder {
             // Imported live sessions are closed so they don't create presence.
             var end = r.endedAt
             if source == .timed && end == nil { end = r.startedAt.addingTimeInterval(r.durationSeconds ?? 0) }
-            return PoopEvent(id: r.id, source: source, startedAt: r.startedAt, endedAt: end, location: r.location.map(poopLocation), pwmSessionID: r.poopWithMeSessionID, partyID: r.partyID, manuallyAdjusted: r.manuallyAdjusted, sharedToGroups: r.sharedToGroups, halfPoints: Int((r.points * 2).rounded()), taps: r.taps, createdAt: r.createdAt, updatedAt: r.updatedAt)
+            // Points are never imported: the file is user-editable, and cosmetics aren't restored either.
+            return PoopEvent(id: r.id, source: source, startedAt: r.startedAt, endedAt: end, location: r.location.map(poopLocation), pwmSessionID: r.poopWithMeSessionID, partyID: r.partyID, manuallyAdjusted: r.manuallyAdjusted, sharedToGroups: r.sharedToGroups, halfPoints: 0, taps: 0, createdAt: r.createdAt, updatedAt: r.updatedAt)
         }
     }
 }
@@ -253,8 +254,12 @@ public extension Store {
     func importHistory(_ events: [PoopEvent]) -> Int {
         var added = 0
         var effects: [Effect] = []
-        for e in events where my.events[e.id] == nil {
+        for var e in events where my.events[e.id] == nil {
+            e.halfPoints = 0
+            e.taps = 0
+            if e.isLive { e.endedAt = e.startedAt }
             put(e)
+            // Not mirrored to groups: groups only see poops logged after joining (friends see all history).
             effects.append(.save(.event(e.id)))
             added += 1
         }

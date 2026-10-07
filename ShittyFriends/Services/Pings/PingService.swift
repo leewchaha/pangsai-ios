@@ -216,6 +216,20 @@ final class PingService {
         return sub
     }
 
+    /// Removes every ping subscription for this iCloud user (delete-all / remote wipe).
+    func deleteAllSubscriptions() async {
+        do {
+            let ids = try await db.allSubscriptions().map(\.subscriptionID).filter { $0.hasPrefix(SubscriptionSpec.idPrefix) }
+            guard !ids.isEmpty else { return }
+            _ = try await db.modifySubscriptions(saving: [], deleting: ids)
+            state.subscriptionFingerprint = nil
+            state.subscriptionsSavedAt = nil
+            persist()
+        } catch {
+            log.error("subscription delete failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Directory for the Notification Service Extension
 
     func writeDirectory() {

@@ -35,17 +35,29 @@ final class CloudSync {
     private(set) var availability: CloudAvailability = .unknown
     var onAvailabilityChange: ((CloudAvailability) -> Void)?
     var onRemoteChangesApplied: (() -> Void)?
+    /// My Me/Private zones were deliberately deleted elsewhere ("Delete all my data" on another device,
+    /// or iCloud data removed in Settings). The app wipes this device's copy to match.
+    var onMyDataDeletedRemotely: (() -> Void)?
 
     private var privateEngine: CKSyncEngine?
     private var sharedEngine: CKSyncEngine?
     private var privateDelegate: EngineDelegate?
     private var sharedDelegate: EngineDelegate?
     private let stateDirectory: URL
+    /// Changes made while the engines weren't running yet (offline launch, or before the first
+    /// account check finished). Persisted, then handed to the engines as soon as they start.
+    private var queued: [QueuedChange]
+    /// After a replay, the queue file is kept until both engines have persisted their own state.
+    private var replayAwaitingState: Set<CloudDatabaseScope> = []
+    /// Zones this device deleted this session: never recreate them from a failed save.
+    private var deletedZones: Set<ZoneRef> = []
 
     init(store: Store, directory: URL) {
         self.store = store
         self.stateDirectory = directory
         self.metadata = RecordMetadataStore(directory: directory)
+        let url = directory.appendingPathComponent("engine-queue.json")
+        self.queued = (try? JSONDecoder().decode([QueuedChange].self, from: Data(contentsOf: url))) ?? []
     }
 
     // MARK: - Lifecycle
@@ -72,14 +84,18 @@ final class CloudSync {
             @unknown default:
                 setAvailability(.error("Unknown iCloud status")); return
             }
-            let userID = try await container.userRecordID()
-            if let previous = store.my.userID, previous != userID.recordName, previous != UserID.localMe {
-                // Different iCloud account than the data on this device: start clean.
-                log.info("iCloud account switched; resetting local state")
-                store.resetForAccountChange(keepOnboarding: false)
-                metadata.removeAll()
-                deleteEngineStates()
+            if let known = store.my.userID, known != UserID.localMe {
+                // Already signed in on this device before: start syncing right away (works offline;
+                // the engines send once the network is back) and confirm the account afterwards.
+                startEngines()
+                setAvailability(.available)
+                ensureBaseZones()
+                if let current = try? await container.userRecordID(), current.recordName != known {
+                    switchAccount(to: current.recordName)
+                }
+                return
             }
+            let userID = try await container.userRecordID()
             store.setUserID(userID.recordName)
             startEngines()
             setAvailability(.available)
@@ -88,6 +104,27 @@ final class CloudSync {
             log.error("start failed: \(error.localizedDescription, privacy: .public)")
             setAvailability(.error(error.localizedDescription))
         }
+    }
+
+    /// A different iCloud account than the data on this device: start clean.
+    private func switchAccount(to recordName: String) {
+        log.info("iCloud account switched; resetting local state")
+        stopEngines()
+        store.resetForAccountChange(keepOnboarding: false)
+        metadata.removeAll()
+        deleteEngineStates()
+        clearQueue()
+        UserDefaults.standard.removeObject(forKey: "sf.initialUploadDone")
+        store.setUserID(recordName)
+        startEngines()
+        ensureBaseZones()
+    }
+
+    private func stopEngines() {
+        privateEngine = nil
+        sharedEngine = nil
+        privateDelegate = nil
+        sharedDelegate = nil
     }
 
     private func setAvailability(_ a: CloudAvailability) {
@@ -103,6 +140,7 @@ final class CloudSync {
         sharedDelegate = sd
         privateEngine = CKSyncEngine(CKSyncEngine.Configuration(database: container.privateCloudDatabase, stateSerialization: loadState(.private), delegate: pd))
         sharedEngine = CKSyncEngine(CKSyncEngine.Configuration(database: container.sharedCloudDatabase, stateSerialization: loadState(.shared), delegate: sd))
+        replayQueue()
     }
 
     private func engine(_ scope: CloudDatabaseScope) -> CKSyncEngine? {
@@ -134,39 +172,124 @@ final class CloudSync {
         refs += my.friendLinks.keys.map { .friendLink($0) }
         refs += my.groupLinks.keys.map { .groupLink($0) }
         refs += my.invites.keys.map { .invite($0) }
+        refs += my.spaceLinks.keys.map { .spaceLink($0) }
         for ref in refs { save(ref) }
     }
 
     // MARK: - Queueing
 
     func save(_ ref: RecordRef) {
-        guard let e = engine(ref.isPrivateDatabase ? .private : .shared) else { return }
-        e.state.add(pendingRecordZoneChanges: [.saveRecord(ref.recordID)])
+        apply(QueuedChange(.save, zone: ref.zone, recordName: ref.recordName))
     }
 
     func delete(_ ref: RecordRef) {
-        guard let e = engine(ref.isPrivateDatabase ? .private : .shared) else { return }
-        e.state.add(pendingRecordZoneChanges: [.deleteRecord(ref.recordID)])
+        apply(QueuedChange(.delete, zone: ref.zone, recordName: ref.recordName))
     }
 
     /// Make sure a zone I own exists before records go into it.
     func ensureZone(_ zone: ZoneRef) {
-        guard zone.isMine, let e = privateEngine else { return }
-        e.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zone.zoneID))])
+        guard zone.isMine else { return }
+        apply(QueuedChange(.saveZone, zone: zone))
     }
 
     func deleteZone(_ zone: ZoneRef) {
-        guard zone.isMine, let e = privateEngine else { return }
-        e.state.add(pendingDatabaseChanges: [.deleteZone(zone.zoneID)])
+        guard zone.isMine else { return }
+        if zone == .me || zone == .privateZone {
+            // Remember it, so the deletion echoing back from iCloud isn't mistaken for another device's.
+            UserDefaults.standard.set(Date(), forKey: Self.selfDeletedBaseZonesKey)
+        }
+        dropPendingRecordChanges(in: zone)
+        apply(QueuedChange(.deleteZone, zone: zone))
         metadata.removeZone(zone.zoneID)
+    }
+
+    static let selfDeletedBaseZonesKey = "sf.selfDeletedBaseZonesAt"
+
+    /// A zone that's going away must not have record saves behind it (they'd fail with zoneNotFound
+    /// and the retry path would recreate the zone).
+    private func dropPendingRecordChanges(in zone: ZoneRef) {
+        deletedZones.insert(zone)
+        let before = queued.count
+        queued.removeAll { $0.zone == zone && ($0.kind == .save || $0.kind == .delete) }
+        if queued.count != before { persistQueue() }
+        guard let e = engine(zone.isMine ? .private : .shared) else { return }
+        let stale = e.state.pendingRecordZoneChanges.filter { change in
+            switch change {
+            case .saveRecord(let id), .deleteRecord(let id): return id.zoneID == zone.zoneID
+            @unknown default: return false
+            }
+        }
+        if !stale.isEmpty { e.state.remove(pendingRecordZoneChanges: stale) }
     }
 
     /// Leaves a zone someone else shared with me. Deleting a zone in the shared database removes
     /// me as a participant; the owner's data is untouched.
     func leaveZone(_ zone: ZoneRef) {
-        guard !zone.isMine, let e = sharedEngine else { return }
-        e.state.add(pendingDatabaseChanges: [.deleteZone(zone.zoneID)])
+        guard !zone.isMine else { return }
+        dropPendingRecordChanges(in: zone)
+        apply(QueuedChange(.deleteZone, zone: zone))
         metadata.removeZone(zone.zoneID)
+    }
+
+    /// Hands a change to the right engine, or queues it (persisted) until the engines start.
+    private func apply(_ change: QueuedChange) {
+        if change.kind == .saveZone || change.kind == .save { deletedZones.remove(change.zone) }
+        guard let e = engine(change.zone.isMine ? .private : .shared) else {
+            // Last write wins: a later save/delete of the same record (or zone) replaces the earlier one.
+            queued.removeAll { $0.supersededBy(change) }
+            queued.append(change)
+            persistQueue()
+            return
+        }
+        Self.add(change, to: e)
+    }
+
+    private static func add(_ change: QueuedChange, to e: CKSyncEngine) {
+        let zoneID = change.zone.zoneID
+        switch change.kind {
+        case .save:
+            guard let name = change.recordName else { return }
+            e.state.add(pendingRecordZoneChanges: [.saveRecord(CKRecord.ID(recordName: name, zoneID: zoneID))])
+        case .delete:
+            guard let name = change.recordName else { return }
+            e.state.add(pendingRecordZoneChanges: [.deleteRecord(CKRecord.ID(recordName: name, zoneID: zoneID))])
+        case .saveZone:
+            e.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
+        case .deleteZone:
+            e.state.add(pendingDatabaseChanges: [.deleteZone(zoneID)])
+        }
+    }
+
+    private func replayQueue() {
+        guard !queued.isEmpty else { return }
+        let pending = queued
+        queued = []
+        // Keep the file until both engines have saved state containing these changes.
+        replayAwaitingState = [.private, .shared]
+        log.info("replaying \(pending.count) changes queued before sync started")
+        for change in pending {
+            // Zones must be queued before records that go into them; CKSyncEngine sends database
+            // changes first, so plain order is fine.
+            if let e = engine(change.zone.isMine ? .private : .shared) { Self.add(change, to: e) }
+        }
+    }
+
+    private var queueURL: URL { stateDirectory.appendingPathComponent("engine-queue.json") }
+
+    private func persistQueue() {
+        if let data = try? JSONEncoder().encode(queued) { try? data.write(to: queueURL, options: [.atomic]) }
+    }
+
+    private func clearQueue() {
+        queued = []
+        replayAwaitingState = []
+        try? FileManager.default.removeItem(at: queueURL)
+    }
+
+    /// Forget everything local about sync (used by "Delete all my data").
+    func resetLocalSyncState() {
+        metadata.removeAll()
+        clearQueue()
     }
 
     /// Creates a zone right now (needed before a share can be saved for it).
@@ -230,27 +353,48 @@ final class CloudSync {
     fileprivate func handle(_ event: CKSyncEngine.Event, scope: CloudDatabaseScope, engine: CKSyncEngine) {
         switch event {
         case .stateUpdate(let e):
+            // A replaced engine (after an account switch) must not overwrite the new engine's state.
+            guard engine === self.engine(scope) else { return }
             saveState(e.stateSerialization, scope: scope)
+            if replayAwaitingState.remove(scope) != nil, replayAwaitingState.isEmpty, queued.isEmpty {
+                try? FileManager.default.removeItem(at: queueURL)
+            }
 
         case .accountChange(let e):
+            // Both engines report the same account change; handle it once.
+            guard scope == .private, engine === privateEngine else { return }
             handleAccountChange(e)
 
         case .fetchedDatabaseChanges(let e):
             var changes: [RemoteChange] = []
-            var baseZoneLost = false
+            var baseZoneReset = false
+            var baseZoneDeleted = false
             for d in e.deletions {
                 metadata.removeZone(d.zoneID)
                 let zone = ZoneRef(d.zoneID)
                 if zone.isMine && (zone.zoneName == ZoneNames.me || zone.zoneName == ZoneNames.private) {
-                    // My own base zone vanished (e.g. "Delete iCloud data" on another device).
-                    // This device still has everything: recreate and re-upload.
-                    baseZoneLost = true
+                    switch d.reason {
+                    case .encryptedDataReset:
+                        // iCloud Keychain reset wiped encrypted data: this device still has it, re-upload.
+                        baseZoneReset = true
+                    case .deleted where Self.deletedByThisDeviceRecently:
+                        // Our own "Delete all my data" coming back from the server.
+                        continue
+                    case .deleted, .purged:
+                        // Deleted on purpose (another device's "Delete all my data", or the user removed
+                        // the app's iCloud data in Settings): don't resurrect it.
+                        baseZoneDeleted = true
+                    @unknown default:
+                        baseZoneDeleted = true
+                    }
                     continue
                 }
                 changes.append(.zoneDeleted(zone))
             }
             store.apply(changes)
-            if baseZoneLost {
+            if baseZoneDeleted {
+                onMyDataDeletedRemotely?()
+            } else if baseZoneReset {
                 engine.state.add(pendingDatabaseChanges: [
                     .saveZone(CKRecordZone(zoneID: ZoneRef.me.zoneID)),
                     .saveZone(CKRecordZone(zoneID: ZoneRef.privateZone.zoneID))
@@ -264,7 +408,12 @@ final class CloudSync {
                 let record = m.record
                 metadata.update(record)
                 if let decoded = RecordCoder.decode(record) {
-                    changes.append(.upsert(decoded, zone: ZoneRef(record.recordID.zoneID)))
+                    let zone = ZoneRef(record.recordID.zoneID)
+                    if let writer = lastWriter(of: record) {
+                        changes.append(.upsertFrom(decoded, zone: zone, writer: writer))
+                    } else {
+                        changes.append(.upsert(decoded, zone: zone))
+                    }
                 }
             }
             for d in e.deletions {
@@ -291,6 +440,19 @@ final class CloudSync {
         @unknown default:
             break
         }
+    }
+
+    /// The iCloud user who last saved `record` ("__defaultOwner__" means me).
+    private func lastWriter(of record: CKRecord) -> UserID? {
+        guard let name = record.lastModifiedUserRecordID?.recordName else { return nil }
+        if name == CKCurrentUserDefaultName { return store.userID }
+        return name
+    }
+
+    /// True for a day after this device deleted its own Me/Private zones.
+    private static var deletedByThisDeviceRecently: Bool {
+        guard let at = UserDefaults.standard.object(forKey: selfDeletedBaseZonesKey) as? Date else { return false }
+        return Date().timeIntervalSince(at) < 24 * 3600
     }
 
     private func handleSent(_ e: CKSyncEngine.Event.SentRecordZoneChanges, engine: CKSyncEngine) {
@@ -320,7 +482,10 @@ final class CloudSync {
             case .zoneNotFound:
                 let zone = ZoneRef(id.zoneID)
                 metadata.remove(id)
-                if zone.isMine {
+                if zone.isMine && deletedZones.contains(zone) {
+                    // The zone was deleted on purpose; drop the save.
+                    continue
+                } else if zone.isMine {
                     zones.append(.saveZone(CKRecordZone(zoneID: id.zoneID)))
                     retry.append(.saveRecord(id))
                 } else {
@@ -353,11 +518,13 @@ final class CloudSync {
         case .signIn:
             uploadEverythingMine()
         case .signOut, .switchAccounts:
+            stopEngines()
             store.resetForAccountChange(keepOnboarding: false)
             metadata.removeAll()
             deleteEngineStates()
-            privateEngine = nil
-            sharedEngine = nil
+            clearQueue()
+            UserDefaults.standard.removeObject(forKey: "sf.initialUploadDone")
+            setAvailability(.unknown)
             Task { await self.start() }
         @unknown default:
             break
@@ -413,5 +580,34 @@ private final class EngineDelegate: CKSyncEngineDelegate, @unchecked Sendable {
     func nextRecordZoneChangeBatch(_ context: CKSyncEngine.SendChangesContext, syncEngine: CKSyncEngine) async -> CKSyncEngine.RecordZoneChangeBatch? {
         guard let sync = sync else { return nil }
         return await sync.nextBatch(context, engine: syncEngine)
+    }
+}
+
+/// A change waiting for the sync engines to start. Stored by zone + record name so it survives relaunch.
+private struct QueuedChange: Codable, Hashable {
+    enum Kind: String, Codable { case save, delete, saveZone, deleteZone }
+    var kind: Kind
+    var zone: ZoneRef
+    var recordName: String?
+
+    init(_ kind: Kind, zone: ZoneRef, recordName: String? = nil) {
+        self.kind = kind
+        self.zone = zone
+        self.recordName = recordName
+    }
+
+    /// Whether `later` makes this queued change pointless (same record, or same zone for zone ops).
+    func supersededBy(_ later: QueuedChange) -> Bool {
+        guard zone == later.zone else { return false }
+        switch (kind, later.kind) {
+        case (.save, .save), (.save, .delete), (.delete, .save), (.delete, .delete):
+            return recordName == later.recordName
+        case (.saveZone, .saveZone), (.saveZone, .deleteZone), (.deleteZone, .saveZone), (.deleteZone, .deleteZone):
+            return true
+        case (.save, .deleteZone), (.delete, .deleteZone):
+            return true // the zone and everything in it is going away
+        default:
+            return false
+        }
     }
 }

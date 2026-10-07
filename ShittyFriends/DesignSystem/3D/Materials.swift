@@ -96,6 +96,9 @@ enum Materials {
             let m = pbr(.white, metal: 1, rough: 0.08)
             m.diffuse.contents = Textures.disco
             m.metalness.contents = 1.0
+            // Faint self-lit tiles so the strobe pulse (PoopFactory) actually shows.
+            m.emission.contents = Textures.disco
+            m.emission.intensity = 0.2
             return m
         case .royal:
             return pbr(UIColor(hex: 0x5B2BB5), metal: 0.25, rough: 0.2, coat: 1)

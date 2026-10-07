@@ -182,10 +182,11 @@ public extension Store {
         return link
     }
 
-    /// Mirror my last 31 days into a newly joined group so this week's/month's rankings are meaningful.
+    /// Mirrors my poops since I joined this group (used when sharing is switched back on).
+    /// Never earlier: group membership is social access, not personal-history access (handoff §15, rule 11).
     internal func backfillGroup(_ link: GroupLink) -> [Effect] {
         guard let uid = my.userID, link.shareEvents else { return [] }
-        let cutoff = clock().addingTimeInterval(-31 * 24 * 3600)
+        let cutoff = link.joinedAt
         let recent = my.events.values.filter { $0.startedAt >= cutoff && $0.sharedToGroups }
         guard !recent.isEmpty else { return [] }
         mutateCache { c in
@@ -250,7 +251,7 @@ public extension Store {
     }
 
     func renameGroup(_ groupID: UUID, name: String, object: GroupObject? = nil, color: IdentityColor? = nil) -> Bool {
-        guard let l = my.groupLinks[groupID], var info = cache.zones[l.zone]?.group, let clean = ContentFilter.cleanGroupName(name) else { return false }
+        guard let l = my.groupLinks[groupID], l.isOwner, var info = cache.zones[l.zone]?.group, let clean = ContentFilter.cleanGroupName(name) else { return false }
         info.name = clean
         if let o = object { info.object = o }
         if let c = color { info.color = c }
@@ -261,6 +262,20 @@ public extension Store {
         link.nameCache = clean
         mutateMy { $0.groupLinks[groupID] = link }
         emit([.save(.groupInfo(l.zone)), .save(.groupLink(groupID)), .refreshDirectory])
+        return true
+    }
+
+    /// Owner only: removes a member's record (the service also removes them from the share).
+    /// Their poop copies go too, so they drop off the leaderboard.
+    @discardableResult
+    func removeMember(_ groupID: UUID, member uid: UserID) -> Bool {
+        guard let l = my.groupLinks[groupID], l.isOwner, uid != my.userID, cache.zones[l.zone]?.members[uid] != nil else { return false }
+        let theirEvents = cache.zones[l.zone]?.events.values.filter { $0.ownerID == uid }.map(\.id) ?? []
+        mutateCache { c in
+            c.zones[l.zone]?.members[uid] = nil
+            for id in theirEvents { c.zones[l.zone]?.events[id] = nil }
+        }
+        emit([.delete(.member(l.zone, uid))] + theirEvents.map { .delete(.groupEvent(l.zone, $0)) } + [.refreshSubscriptions, .refreshDirectory])
         return true
     }
 

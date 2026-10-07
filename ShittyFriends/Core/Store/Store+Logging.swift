@@ -95,8 +95,13 @@ public extension Store {
         let wasLive = e.isLive
         if let s = start { e.startedAt = s }
         if let newEnd = end {
-            e.endedAt = newEnd.map { max(e.startedAt, $0) }
-            if e.source == .instant, newEnd != nil { e.endedAt = nil }
+            if newEnd == nil && e.source == .timed && !wasLive {
+                // A finished timer never becomes live again (that would fake "currently pooping").
+                if let currentEnd = e.endedAt, currentEnd < e.startedAt { e.endedAt = e.startedAt }
+            } else {
+                e.endedAt = newEnd.map { max(e.startedAt, $0) }
+            }
+            if e.source == .instant { e.endedAt = nil }
         } else if let currentEnd = e.endedAt, currentEnd < e.startedAt {
             e.endedAt = e.startedAt
         }
@@ -144,7 +149,8 @@ public extension Store {
     func tapPoop() -> TapOutcome? {
         guard var e = liveEvent else { return nil }
         let now = clock()
-        let daily = PointsEngine.dailyHalfPoints(events: Array(my.events.values), on: e.startedAt, calendar: calendar)
+        // Keyed on when the session was created (immutable), so editing start times can't dodge the cap.
+        let daily = PointsEngine.dailyHalfPoints(events: Array(my.events.values), on: e.createdAt, calendar: calendar)
         var state = tapState
         let outcome = PointsEngine.tap(at: now, sessionTapsBefore: e.taps, sessionHalfPointsBefore: e.halfPoints, dailyHalfPointsBefore: daily, state: &state, rules: rules, roll: randomRoll())
         tapState = state

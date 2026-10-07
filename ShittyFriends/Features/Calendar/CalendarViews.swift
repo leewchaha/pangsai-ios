@@ -306,6 +306,9 @@ struct EventEditorView: View {
     @State private var end = Date()
     @State private var placeName = ""
     @State private var hasLocation = false
+    /// A freshly captured location, applied only when the user taps Save (with the other edits).
+    @State private var pendingLocation: PoopLocation?
+    @State private var locating = false
     @State private var shared = true
     @State private var confirmDelete = false
 
@@ -331,14 +334,25 @@ struct EventEditorView: View {
                 Section("WHERE") {
                     if hasLocation {
                         TextField("Place name", text: $placeName)
-                        Button("Remove location", role: .destructive) { hasLocation = false }
+                        Button("Remove location", role: .destructive) {
+                            hasLocation = false
+                            pendingLocation = nil
+                        }
                     } else {
-                        Button("Use current location") {
+                        Button(locating ? "Locating…" : "Use current location") {
+                            locating = true
                             model.location.locateOnce { loc in
-                                if let loc { model.store.attachLocation(loc, to: event.id); dismiss() }
+                                locating = false
+                                guard let loc else {
+                                    model.info("NO LOCATION", "Couldn't get a fix. Try again outside.")
+                                    return
+                                }
+                                pendingLocation = loc
+                                placeName = loc.label
+                                hasLocation = true
                             }
                         }
-                        .disabled(!model.location.isAuthorized)
+                        .disabled(!model.location.isAuthorized || locating)
                         if !model.location.isAuthorized {
                             Text("Allow location in Settings to attach one.").font(.footnote).foregroundStyle(.secondary)
                         }
@@ -378,11 +392,12 @@ struct EventEditorView: View {
 
     private func save() {
         var location: PoopLocation?? = nil
-        if !hasLocation && event.location != nil {
-            location = .some(nil)
-        } else if hasLocation, var l = event.location, l.label != placeName, !placeName.trimmingCharacters(in: .whitespaces).isEmpty {
-            l.placeName = String(placeName.prefix(40))
-            location = .some(l)
+        if !hasLocation {
+            if event.location != nil { location = .some(nil) }
+        } else if var l = pendingLocation ?? event.location {
+            let name = placeName.trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty, name != l.label { l.placeName = String(name.prefix(40)) }
+            if l != event.location { location = .some(l) }
         }
         let endValue: Date?? = event.source == .instant ? nil : .some(hasEnd ? max(start, end) : nil)
         model.store.edit(event.id, start: start, end: endValue, location: location, sharedToGroups: shared)

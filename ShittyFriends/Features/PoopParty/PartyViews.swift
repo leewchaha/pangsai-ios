@@ -75,7 +75,7 @@ struct PartyDetailView: View {
                         if mine?.joinedAt == nil {
                             Button("JOIN 💩") {
                                 dismiss()
-                                model.joinParty(p)
+                                model.joinParty(p, afterDismissal: true)
                             }
                             .buttonStyle(.sticker(Palette.sun, height: 70))
                             Text("JOIN means you're actually pooping now. +1, timer starts.")

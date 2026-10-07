@@ -169,6 +169,9 @@ public enum RemoteRecord: Hashable, Sendable {
 
 public enum RemoteChange: Hashable, Sendable {
     case upsert(RemoteRecord, zone: ZoneRef)
+    /// Same as `upsert`, with the iCloud user who last wrote the record. Group/session records are
+    /// checked against who is allowed to write them (CloudKit share permissions are all-or-nothing).
+    case upsertFrom(RemoteRecord, zone: ZoneRef, writer: UserID)
     /// `ref` was parsed in `zone` (needed because "Me" refs don't encode the owner).
     case delete(RecordRef, zone: ZoneRef)
     case zoneDeleted(ZoneRef)

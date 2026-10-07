@@ -41,7 +41,6 @@ struct PoopMapView: View {
                     }
                 }
             }
-            .annotationTitles(.hidden)
             .mapStyle(.standard(elevation: .realistic, emphasis: .muted, pointsOfInterest: .excludingAll))
             .mapControls { }
             .onMapCameraChange(frequency: .onEnd) { ctx in

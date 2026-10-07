@@ -136,7 +136,34 @@ final class ShareService {
         }
     }
 
+    /// Self-healing revocation: removes anyone from my history share who is no longer a friend
+    /// (e.g. an unfriend that failed offline, or was done on another device). `allowed` = user IDs
+    /// with any friend link (active or mid-handshake).
+    func reconcileHistoryShare(allowed: Set<UserID>) async {
+        do {
+            guard let share = try await fetchShare(.me) else { return }
+            let stale = share.participants.filter { p in
+                guard p.role != .owner, let uid = p.userIdentity.userRecordID?.recordName else { return false }
+                return !allowed.contains(uid)
+            }
+            guard !stale.isEmpty else { return }
+            for p in stale { share.removeParticipant(p) }
+            meShare = try await save(share)
+            log.info("revoked history access for \(stale.count) former friend(s)")
+        } catch {
+            log.error("history share reconcile failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Groups
+
+    /// Owner only: takes a member out of a group zone's share. (Anyone holding the group link can
+    /// still ask to rejoin; the owner can remove them again.)
+    func removeFromGroup(zone: ZoneRef, uid: UserID) async throws {
+        guard zone.isMine, let share = try await fetchShare(zone), let p = hasParticipant(share, uid: uid) else { return }
+        share.removeParticipant(p)
+        _ = try await save(share)
+    }
 
     /// Creates (or returns) the public read-write link for a group zone I own.
     func groupShareURL(zone: ZoneRef, name: String) async throws -> String {
@@ -226,8 +253,8 @@ final class ShareService {
         op.shouldFetchRootRecord = true
         op.rootRecordDesiredKeys = [RecordTypes.inviteCardPayloadKey]
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CKShare.Metadata, Error>) in
-            op.perShareMetadataResultBlock = { _, result in box.result = result }
-            op.fetchShareMetadataResultBlock = { opResult in
+            op.perShareMetadataResultBlock = { @Sendable _, result in box.result = result }
+            op.fetchShareMetadataResultBlock = { @Sendable opResult in
                 switch opResult {
                 case .failure(let error):
                     cont.resume(throwing: error)

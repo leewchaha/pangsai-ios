@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct GroupsView: View {
     @Environment(AppModel.self) private var model
@@ -325,6 +326,19 @@ struct GroupDetailView: View {
                                 .foregroundStyle(Palette.muted)
                         }
                         Spacer()
+                        if g.link.isOwner && m.id != store.userID {
+                            Menu {
+                                Button("Remove from group", role: .destructive) {
+                                    Task { await model.removeMember(groupID, member: m) }
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle.fill")
+                                    .font(.system(size: 22))
+                                    .foregroundStyle(Palette.muted)
+                                    .frame(width: 44, height: 44)
+                            }
+                            .accessibilityLabel("Member options")
+                        }
                     }
                 }
 
@@ -461,8 +475,8 @@ struct GroupPWMSheet: View {
                     if let live = model.store.liveEvent, let sid = live.pwmSessionID, let view = model.store.liveSession(sid), view.zone == group.link.zone {
                         Task { await model.inviteMore(view, people: people); dismiss() }
                     } else if model.startPWM(group: group, invitees: people) != nil {
-                        model.showSession = true
                         dismiss()
+                        model.presentSession(afterDismissal: true)
                     }
                 }
                 .buttonStyle(.sticker(Palette.pink, ink: .white, height: 60))

@@ -330,6 +330,18 @@ extension AppModel {
         groupOffers[offer.id] = nil
     }
 
+    /// Owner only: remove someone from a group (their record, their poop copies, and their access).
+    func removeMember(_ groupID: UUID, member: GroupMember) async {
+        guard let link = store.my.groupLinks[groupID], link.isOwner else { return }
+        guard store.removeMember(groupID, member: member.id) else { return }
+        do {
+            try await shares.removeFromGroup(zone: link.zone, uid: member.id)
+            info("REMOVED", "@\(member.person.handle) is out of \(link.nameCache).")
+        } catch {
+            self.error("Removed from the list, but iCloud access may remain", error)
+        }
+    }
+
     func leaveGroup(_ groupID: UUID) {
         guard let link = store.my.groupLinks[groupID] else { return }
         store.removeGroupLocal(groupID)
@@ -377,14 +389,15 @@ extension AppModel {
     }
 
     /// JOIN = I'm actually pooping now.
-    func joinPWM(_ sessionID: UUID) {
+    /// `afterDismissal`: the caller is closing a sheet in the same tap (the +1 still happens instantly).
+    func joinPWM(_ sessionID: UUID, afterDismissal: Bool = false) {
         guard let view = store.liveSession(sessionID) else {
             info("TOO LATE", "That session already ended.")
             return
         }
         store.joinPWM(zone: view.zone, sessionID: sessionID)
         openPWM = sessionID
-        showSession = true
+        presentSession(afterDismissal: afterDismissal)
     }
 
     // MARK: - Parties
@@ -409,9 +422,9 @@ extension AppModel {
         }
     }
 
-    func joinParty(_ view: PartyView) {
+    func joinParty(_ view: PartyView, afterDismissal: Bool = false) {
         store.joinParty(zone: view.zone, partyID: view.party.id)
-        showSession = true
+        presentSession(afterDismissal: afterDismissal)
     }
 
     // MARK: - Notification taps

@@ -70,6 +70,36 @@ public extension Store {
         return event
     }
 
+    /// JOIN was tapped before the session had synced (e.g. from a notification): the poop already
+    /// counted. Once the session arrives, record my participation for that poop. Never creates a poop.
+    func attachToPWM(zone: ZoneRef, sessionID: UUID, eventID: UUID) {
+        guard let uid = my.userID, var e = my.events[eventID] else { return }
+        let now = clock()
+        if e.pwmSessionID != sessionID {
+            e.pwmSessionID = sessionID
+            e.updatedAt = now
+            put(e)
+        }
+        var p = cache.zones[zone]?.participants[sessionID]?[uid] ?? PWMParticipant(sessionID: sessionID, person: meRef, status: .invited)
+        p.person = meRef
+        p.status = e.isLive ? .joined : .done
+        p.startedAt = e.startedAt
+        p.endedAt = e.isLive ? nil : (e.endedAt ?? now)
+        p.eventID = e.id
+        p.updatedAt = now
+        let updated = p
+        mutateCache { c in
+            if c.zones[zone] == nil { c.zones[zone] = ZoneCache(zone: zone) }
+            c.zones[zone]?.participants[sessionID, default: [:]][uid] = updated
+        }
+        var effects: [Effect] = [.save(.event(e.id)), .save(.participant(zone, sessionID, uid))]
+        effects += mirrorEffects(for: e)
+        if e.isLive { effects.append(.ping(.pwmJoin(zone: zone, sessionID: sessionID))) }
+        confirmSocialSession(zone: zone, sessionID: sessionID)
+        effects += maybeEndSession(zone: zone, sessionID: sessionID)
+        emit(effects)
+    }
+
     func declinePWM(zone: ZoneRef, sessionID: UUID) {
         guard let uid = my.userID, var p = cache.zones[zone]?.participants[sessionID]?[uid] else { return }
         p.status = .declined
@@ -188,6 +218,27 @@ public extension Store {
         emit([.save(.rsvp(zone, partyID, uid))])
         evaluateAchievements()
         return event
+    }
+
+    /// Party JOIN tapped before the party had synced: attach the already-counted poop.
+    func attachToParty(zone: ZoneRef, partyID: UUID, eventID: UUID) {
+        guard let uid = my.userID, var e = my.events[eventID] else { return }
+        let now = clock()
+        if e.partyID != partyID {
+            e.partyID = partyID
+            e.updatedAt = now
+            put(e)
+        }
+        var r = cache.zones[zone]?.rsvps[partyID]?[uid] ?? PartyRSVP(partyID: partyID, person: meRef, response: .yes)
+        r.person = meRef
+        r.response = .yes
+        r.joinedAt = r.joinedAt ?? e.startedAt
+        r.eventID = e.id
+        r.updatedAt = now
+        let updated = r
+        mutateCache { $0.zones[zone]?.rsvps[partyID, default: [:]][uid] = updated }
+        emit([.save(.event(e.id)), .save(.rsvp(zone, partyID, uid))] + mirrorEffects(for: e))
+        evaluateAchievements()
     }
 
     func cancelParty(zone: ZoneRef, partyID: UUID) {

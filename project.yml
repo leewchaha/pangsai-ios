@@ -14,6 +14,8 @@ settings:
   base:
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
+    # Required by `agvtool new-version` (Codemagic sets the build number with it).
+    VERSIONING_SYSTEM: apple-generic
     SWIFT_VERSION: "5.0"
     SWIFT_STRICT_CONCURRENCY: minimal
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"

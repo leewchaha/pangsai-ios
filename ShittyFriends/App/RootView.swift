@@ -81,10 +81,14 @@ struct ActiveSheetView: View {
             }
         case .pwmInvite(let sid):
             PWMInviteView(sessionID: sid)
+        case .pwmWatch(let sid):
+            PWMWatchView(sessionID: sid)
         case .party(let id):
             NavigationStack { PartyDetailView(partyID: id) }
         case .highlights(let period, let date):
             HighlightsView(period: period, reference: date)
+        case .groupHighlights(let zone):
+            HighlightsView(period: .week, reference: Date().addingTimeInterval(-7 * 24 * 3600), groupZone: zone)
         }
     }
 }

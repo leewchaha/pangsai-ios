@@ -302,6 +302,7 @@ DEFINE SCHEMA
     );
 
     // Public database: anonymous pings. `to` is a random inbox token; `ref` is AES-GCM sealed.
+    // Readable only by signed-in iCloud users (every ShittyFriends user is), not the open web.
     // Query subscriptions filter on `to` and `kind`, so both must be QUERYABLE.
     RECORD TYPE Ping (
         "___createTime" TIMESTAMP,
@@ -317,5 +318,5 @@ DEFINE SCHEMA
         "to"            STRING QUERYABLE,
         GRANT WRITE TO "_creator",
         GRANT CREATE TO "_icloud",
-        GRANT READ TO "_world"
+        GRANT READ TO "_icloud"
     );

@@ -55,16 +55,22 @@ enum ActiveSheet: Identifiable, Equatable {
     case friendInvite(FriendInvitePayload)
     case groupJoin(UUID)
     case pwmInvite(UUID)
+    /// Watch (and react to) a Poop With Me session after my own DONE.
+    case pwmWatch(UUID)
     case party(UUID)
     case highlights(HighlightPeriod, Date)
+    /// Last week's highlights for one group (from a group highlights notification).
+    case groupHighlights(ZoneRef)
 
     var id: String {
         switch self {
         case .friendInvite(let p): return "fi-" + p.t
         case .groupJoin(let id): return "gj-" + id.uuidString
         case .pwmInvite(let id): return "pwm-" + id.uuidString
+        case .pwmWatch(let id): return "pwmw-" + id.uuidString
         case .party(let id): return "party-" + id.uuidString
         case .highlights(let p, let d): return "hl-\(p.rawValue)-\(d.timeIntervalSince1970)"
+        case .groupHighlights(let z): return "ghl-" + z.description
         }
     }
 }
@@ -99,6 +105,9 @@ final class AppModel {
     /// True while "Delete all my data" runs (so our own zone deletions aren't treated as remote ones).
     @ObservationIgnored var isDeletingAll = false
     @ObservationIgnored private var pollTasks: [String: Task<Void, Never>] = [:]
+    /// How many visible screens want each zone polled (panels can overlap during transitions).
+    @ObservationIgnored private var pollRefs: [String: Int] = [:]
+    @ObservationIgnored private var pollIntervals: [String: Double] = [:]
     @ObservationIgnored private var startTask: Task<Void, Never>?
 
     init() {
@@ -147,7 +156,7 @@ final class AppModel {
             await pings.refreshSubscriptions(force: false)
             await refresh()
         }
-        notifications.rescheduleSummaries(settings: store.settings)
+        notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
         for p in store.parties() where store.myRSVP(p)?.response != .no { notifications.scheduleParty(p, settings: store.settings) }
     }
 
@@ -163,6 +172,8 @@ final class AppModel {
         cleanupSpaces()
         await cloud.fetchAll()
         store.repairMyGroupRecords()
+        // Groups may have been created, joined or left: keep per-group highlight alerts current.
+        notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
         await processIncomingPings()
         await reconcileHistoryShareIfDue()
     }
@@ -251,7 +262,7 @@ final class AppModel {
         case .refreshDirectory:
             pings.writeDirectory()
         case .rescheduleSummaries:
-            notifications.rescheduleSummaries(settings: store.settings)
+            notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
         case .achievementsUnlocked(let ids):
             for id in ids {
                 show(Toast(style: .achievement(id), title: id.title.uppercased(), body: id.detail))
@@ -312,19 +323,29 @@ final class AppModel {
 
     // MARK: - Live polling (only while a social screen is visible)
 
+    /// Reference-counted: every start must be balanced by a stop. The fastest requested interval wins.
     func startPolling(_ zone: ZoneRef, every seconds: Double = 4) {
         let key = zone.description
-        guard pollTasks[key] == nil else { return }
+        pollRefs[key, default: 0] += 1
+        let interval = min(seconds, pollIntervals[key] ?? seconds)
+        if pollTasks[key] != nil, interval == pollIntervals[key] { return }
+        pollTasks[key]?.cancel()
+        pollIntervals[key] = interval
         pollTasks[key] = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.cloud.fetch(zone: zone)
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
     }
 
     func stopPolling(_ zone: ZoneRef) {
-        pollTasks.removeValue(forKey: zone.description)?.cancel()
+        let key = zone.description
+        let remaining = max(0, (pollRefs[key] ?? 0) - 1)
+        pollRefs[key] = remaining == 0 ? nil : remaining
+        guard remaining == 0 else { return }
+        pollTasks.removeValue(forKey: key)?.cancel()
+        pollIntervals[key] = nil
     }
 
     /// Friends' presence while TODAY is visible.

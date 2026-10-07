@@ -91,12 +91,20 @@ struct TodayView: View {
 
     @ViewBuilder private var invitesSection: some View {
         let invites = store.pendingInvites()
+        let watchable = store.liveEvent == nil ? store.watchableSessions() : []
         let joinable = store.parties().filter { $0.party.isJoinable(now: Date()) && store.myRSVP($0)?.joinedAt == nil }
-        if !invites.isEmpty || !joinable.isEmpty || !store.friendRequests.isEmpty {
+        if !invites.isEmpty || !watchable.isEmpty || !joinable.isEmpty || !store.friendRequests.isEmpty {
             VStack(spacing: 12) {
+                ForEach(watchable) { v in
+                    let still = v.participants.filter { $0.status == .joined }.count
+                    InviteCard(emoji: "👀", title: "POOP WITH ME · STILL GOING", subtitle: "\(still) still pooping\(v.groupName.map { " · " + $0 } ?? "")", fill: Palette.sun, action: "WATCH", primary: {
+                        model.sheet = .pwmWatch(v.session.id)
+                    }, secondary: nil)
+                }
                 ForEach(invites) { v in
                     let host = v.participants.first(where: { $0.id == v.session.creatorID })?.person ?? store.person(for: v.session.creatorID)
-                    InviteCard(emoji: "💩", title: "@\(host?.handle ?? "someone") WANTS TO POOP WITH YOU", subtitle: v.groupName ?? "Poop With Me", fill: Palette.pink, action: "JOIN", primary: {
+                    let hostLabel = store.labels(in: v.zone)[v.session.creatorID] ?? "@" + (host?.handle ?? "someone")
+                    InviteCard(emoji: "💩", title: "\(hostLabel.uppercased()) WANTS TO POOP WITH YOU", subtitle: v.groupName ?? "Poop With Me", fill: Palette.pink, action: "JOIN", primary: {
                         model.joinPWM(v.session.id)
                     }, secondary: {
                         store.declinePWM(zone: v.zone, sessionID: v.session.id)

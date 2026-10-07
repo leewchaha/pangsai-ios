@@ -3,7 +3,11 @@ import SwiftUI
 struct OnboardingFlow: View {
     @Environment(AppModel.self) private var model
     @State private var step = 0
-    @State private var olderThan13 = false
+    /// Neutral age screen: date of birth is asked, checked, and never stored.
+    @State private var birthDate = Date()
+    @State private var pickedBirthDate = false
+    @AppStorage("sf.ageBlocked") private var ageBlocked = false
+    @State private var confirmUnderage = false
     @State private var handle = ""
     @State private var avatar = AvatarSpec.random()
     @State private var color = IdentityColor.random()
@@ -65,23 +69,44 @@ struct OnboardingFlow: View {
                 .font(.heading(16))
                 .foregroundStyle(Palette.inkFixed.opacity(0.8))
             Spacer()
-            Button {
-                olderThan13.toggle()
-                Haptics.tick()
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: olderThan13 ? "checkmark.square.fill" : "square").font(.system(size: 22, weight: .bold))
-                    Text("I'm 13 or older").font(.heading(15))
+            if ageBlocked {
+                Text("ShittyFriends is for people 13 and older. Come back when you're older.")
+                    .font(.heading(15))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Palette.inkFixed)
+                    .padding(14)
+                    .sticker(.white, radius: 18, shadow: 3)
+            } else {
+                VStack(spacing: 6) {
+                    Text("WHEN WERE YOU BORN?").font(.heading(13)).foregroundStyle(Palette.inkFixed)
+                    DatePicker("Date of birth", selection: Binding(get: { birthDate }, set: { birthDate = $0; pickedBirthDate = true }), in: ...Date(), displayedComponents: .date)
+                        .datePickerStyle(.compact)
+                        .labelsHidden()
+                    Text("Only used to check your age. Not saved.").font(.ui(12, .medium)).foregroundStyle(Palette.inkFixed.opacity(0.7))
                 }
-                .foregroundStyle(Palette.inkFixed)
+                Button("LET'S GO") {
+                    let age = Calendar.current.dateComponents([.year], from: birthDate, to: Date()).year ?? 0
+                    if age >= 13 {
+                        model.store.confirmAge()
+                        next()
+                    } else {
+                        // Double-check first: a slip on the date wheel shouldn't lock anyone out.
+                        confirmUnderage = true
+                    }
+                }
+                .buttonStyle(.sticker(.white, ink: Palette.inkFixed, height: 62))
+                .disabled(!pickedBirthDate)
+                .opacity(pickedBirthDate ? 1 : 0.5)
+                .alert("Is that right?", isPresented: $confirmUnderage) {
+                    Button("Change date", role: .cancel) {}
+                    Button("Yes, that's right") {
+                        ageBlocked = true
+                        Haptics.play(.warning)
+                    }
+                } message: {
+                    Text("You picked \(birthDate.formatted(date: .long, time: .omitted)).")
+                }
             }
-            Button("LET'S GO") {
-                model.store.confirmAge()
-                next()
-            }
-            .buttonStyle(.sticker(.white, ink: Palette.inkFixed, height: 62))
-            .disabled(!olderThan13)
-            .opacity(olderThan13 ? 1 : 0.5)
         }
         .gutter()
         .padding(.bottom, 20)

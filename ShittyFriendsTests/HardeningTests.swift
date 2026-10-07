@@ -190,3 +190,103 @@ final class HardeningTests: XCTestCase {
         XCTAssertFalse(store.removeMember(mine.id, member: "_me"), "can't remove yourself")
     }
 }
+
+/// Group trophies, friend ranking, and JOIN-before-sync attachment.
+final class GroupFeatureTests: XCTestCase {
+    private func ge(_ owner: UserID, _ at: Date, country: String? = nil) -> GroupEvent {
+        GroupEvent(id: UUID(), ownerID: owner, source: .instant, startedAt: at, endedAt: nil,
+                   location: country.map { PoopLocation(latitude: 0, longitude: 0, countryCode: $0) }, pwmSessionID: nil, partyID: nil)
+    }
+
+    private func member(_ id: UserID, joined: Date) -> GroupMember {
+        GroupMember(person: PersonRef(id: id, handle: id, avatar: AvatarSpec(), color: .lime), inbox: id + "-in", role: .member, joinedAt: joined)
+    }
+
+    func testGroupTrophies() {
+        let cal = TestEnv.calendar
+        let t = TestClock.date("2026-10-06T08:00:00+09:00")
+        let members = ["_a", "_b", "_c"].map { member($0, joined: t.addingTimeInterval(-86400)) }
+        // Same day, all three, within 10 minutes; plus a 4th member who joined *after* that day.
+        var events = [ge("_a", t), ge("_b", t.addingTimeInterval(300)), ge("_c", t.addingTimeInterval(540))]
+        let late = member("_d", joined: t.addingTimeInterval(3 * 86400))
+        var status = Dictionary(uniqueKeysWithValues: GroupAchievementEngine.evaluate(events: events, members: members + [late], sessionParticipants: [], partyRSVPs: [], calendar: cal).map { ($0.id, $0) })
+        XCTAssertTrue(status[.fullHouse]!.earned)
+        XCTAssertTrue(status[.synchronized]!.earned)
+        XCTAssertFalse(status[.nightShiftCrew]!.earned)
+        XCTAssertFalse(status[.internationalIncident]!.earned)
+
+        // Spread out over an hour: not synchronized. Two countries: international.
+        events = [ge("_a", t, country: "JP"), ge("_b", t.addingTimeInterval(1800)), ge("_c", t.addingTimeInterval(3600), country: "MY")]
+        status = Dictionary(uniqueKeysWithValues: GroupAchievementEngine.evaluate(events: events, members: members, sessionParticipants: [], partyRSVPs: [], calendar: cal).map { ($0.id, $0) })
+        XCTAssertFalse(status[.synchronized]!.earned)
+        XCTAssertTrue(status[.internationalIncident]!.earned)
+
+        // Only two people: never a full house.
+        status = Dictionary(uniqueKeysWithValues: GroupAchievementEngine.evaluate(events: [ge("_a", t), ge("_b", t)], members: Array(members.prefix(2)), sessionParticipants: [], partyRSVPs: [], calendar: cal).map { ($0.id, $0) })
+        XCTAssertFalse(status[.fullHouse]!.earned)
+    }
+
+    func testTagTeamAndPartyOn() {
+        let cal = TestEnv.calendar
+        let t = TestClock.date("2026-10-06T08:00:00+09:00")
+        let sid = UUID()
+        func p(_ id: UserID, _ s: ParticipantStatus) -> PWMParticipant {
+            PWMParticipant(sessionID: sid, person: PersonRef(id: id, handle: id, avatar: AvatarSpec(), color: .lime), status: s, startedAt: s == .invited ? nil : t)
+        }
+        let two = [p("_a", .joined), p("_b", .done), p("_c", .invited)]
+        let three = [p("_a", .joined), p("_b", .done), p("_c", .joined)]
+        let pid = UUID()
+        func r(_ id: UserID, joined: Bool) -> PartyRSVP {
+            PartyRSVP(partyID: pid, person: PersonRef(id: id, handle: id, avatar: AvatarSpec(), color: .lime), response: .yes, joinedAt: joined ? t : nil)
+        }
+        let s1 = GroupAchievementEngine.evaluate(events: [], members: [], sessionParticipants: [two], partyRSVPs: [[r("_a", joined: true), r("_b", joined: true), r("_c", joined: false)]], calendar: cal)
+        XCTAssertFalse(s1.first { $0.id == .tagTeam }!.earned)
+        XCTAssertFalse(s1.first { $0.id == .partyOn }!.earned)
+        let s2 = GroupAchievementEngine.evaluate(events: [], members: [], sessionParticipants: [three], partyRSVPs: [[r("_a", joined: true), r("_b", joined: true), r("_c", joined: true)]], calendar: cal)
+        XCTAssertTrue(s2.first { $0.id == .tagTeam }!.earned)
+        XCTAssertTrue(s2.first { $0.id == .partyOn }!.earned)
+    }
+
+    func testFriendLeaderboardIncludesMe() {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        store.logInstant()
+        let board = store.friendLeaderboard()
+        XCTAssertEqual(board.count, 1)
+        XCTAssertEqual(board.first?.person.id, "_me")
+        XCTAssertEqual(board.first?.count, 1)
+    }
+
+    func testJoinFromNotificationNeverDoubleCounts() {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        let zone = ZoneRef(ownerName: "_josh", zoneName: ZoneNames.session(UUID()))
+        let sid = UUID()
+        // JOIN tapped from a notification before the session synced: +1 now.
+        let e = store.startTimed(pwmSessionID: sid)
+        XCTAssertEqual(store.todayCount(), 1)
+        clock.advance(120)
+        store.finish()
+        // Session arrives later: attach, don't create another poop.
+        store.apply([.upsert(.pwmSession(PWMSession(id: sid, creatorID: "_josh")), zone: zone)])
+        store.attachToPWM(zone: zone, sessionID: sid, eventID: e.id)
+        XCTAssertEqual(store.todayCount(), 1)
+        XCTAssertEqual(store.cache.zones[zone]?.participants[sid]?["_me"]?.status, .done)
+        XCTAssertEqual(store.cache.zones[zone]?.participants[sid]?["_me"]?.eventID, e.id)
+    }
+
+    func testLabelsDisambiguateInsideOneZoneOnly() {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        let zone = ZoneRef(ownerName: "_josh", zoneName: ZoneNames.session(UUID()))
+        let sid = UUID()
+        let lee2 = PersonRef(id: "_other", handle: "lee", avatar: AvatarSpec(), color: .mint)
+        store.apply([
+            .upsert(.pwmSession(PWMSession(id: sid, creatorID: "_josh")), zone: zone),
+            .upsert(.participant(PWMParticipant(sessionID: sid, person: store.meRef, status: .invited)), zone: zone),
+            .upsert(.participant(PWMParticipant(sessionID: sid, person: lee2, status: .joined, startedAt: clock.now)), zone: zone)
+        ])
+        let labels = store.labels(in: zone)
+        XCTAssertEqual(Set([labels["_me"], labels["_other"]]), Set(["@lee (1)", "@lee (2)"]))
+    }
+}

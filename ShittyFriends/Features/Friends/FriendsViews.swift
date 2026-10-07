@@ -63,6 +63,21 @@ struct FriendsView: View {
                     }
                 }
 
+                if !friends.isEmpty {
+                    let board = store.friendLeaderboard(period: .week)
+                    SectionTitle("THIS WEEK")
+                    VStack(spacing: 0) {
+                        ForEach(board.indices, id: \.self) { i in
+                            let row = board[i]
+                            LeaderRow(rank: i, label: "@" + row.person.handle, person: row.person, count: row.count, isMe: row.person.id == store.userID)
+                            if i < board.count - 1 { Divider().overlay(Palette.line.opacity(0.2)) }
+                        }
+                    }
+                    .foregroundStyle(Palette.ink)
+                    .padding(14)
+                    .sticker(Palette.card)
+                }
+
                 SectionTitle("FRIENDS · \(friends.count)")
                 if friends.isEmpty {
                     EmptyState(emoji: "🧻", title: "NO SHITTY FRIENDS YET", message: "Send your invite link or show your QR. They confirm, you confirm, histories unlock.")

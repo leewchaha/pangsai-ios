@@ -367,39 +367,26 @@ final class CloudSync {
 
         case .fetchedDatabaseChanges(let e):
             var changes: [RemoteChange] = []
-            var baseZoneReset = false
             var baseZoneDeleted = false
             for d in e.deletions {
                 metadata.removeZone(d.zoneID)
                 let zone = ZoneRef(d.zoneID)
                 if zone.isMine && (zone.zoneName == ZoneNames.me || zone.zoneName == ZoneNames.private) {
-                    switch d.reason {
-                    case .encryptedDataReset:
-                        // iCloud Keychain reset wiped encrypted data: this device still has it, re-upload.
-                        baseZoneReset = true
-                    case .deleted where Self.deletedByThisDeviceRecently:
-                        // Our own "Delete all my data" coming back from the server.
-                        continue
-                    case .deleted, .purged:
-                        // Deleted on purpose (another device's "Delete all my data", or the user removed
-                        // the app's iCloud data in Settings): don't resurrect it.
-                        baseZoneDeleted = true
-                    @unknown default:
-                        baseZoneDeleted = true
-                    }
+                    // Per the CKSyncEngine docs, for every reason (deleted by another of my devices,
+                    // purged in Settings, or an encrypted-data reset) local data must be deleted and
+                    // never re-sent. The only exception is our own "Delete all my data" echoing back.
+                    if d.reason == .deleted && Self.deletedByThisDeviceRecently { continue }
+                    baseZoneDeleted = true
                     continue
                 }
                 changes.append(.zoneDeleted(zone))
             }
             store.apply(changes)
             if baseZoneDeleted {
+                // Drop anything still queued for those zones so nothing is re-sent.
+                dropPendingRecordChanges(in: .me)
+                dropPendingRecordChanges(in: .privateZone)
                 onMyDataDeletedRemotely?()
-            } else if baseZoneReset {
-                engine.state.add(pendingDatabaseChanges: [
-                    .saveZone(CKRecordZone(zoneID: ZoneRef.me.zoneID)),
-                    .saveZone(CKRecordZone(zoneID: ZoneRef.privateZone.zoneID))
-                ])
-                uploadEverythingMine()
             }
 
         case .fetchedRecordZoneChanges(let e):

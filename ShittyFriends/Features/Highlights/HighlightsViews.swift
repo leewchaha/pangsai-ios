@@ -7,7 +7,13 @@ struct HighlightsView: View {
     var period: HighlightPeriod
     var reference: Date
     @State private var index = 0
-    @State private var scope: Scope = .friends
+    @State private var scope: Scope
+
+    init(period: HighlightPeriod, reference: Date, groupZone: ZoneRef? = nil) {
+        self.period = period
+        self.reference = reference
+        _scope = State(initialValue: groupZone.map { Scope.group($0) } ?? .friends)
+    }
 
     enum Scope: Hashable { case friends, group(ZoneRef) }
 

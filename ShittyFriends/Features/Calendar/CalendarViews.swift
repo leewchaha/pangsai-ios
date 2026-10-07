@@ -309,6 +309,8 @@ struct EventEditorView: View {
     /// A freshly captured location, applied only when the user taps Save (with the other edits).
     @State private var pendingLocation: PoopLocation?
     @State private var locating = false
+    @State private var query = ""
+    @State private var results: [PoopLocation] = []
     @State private var shared = true
     @State private var confirmDelete = false
 
@@ -318,7 +320,10 @@ struct EventEditorView: View {
                 Section("WHEN") {
                     DatePicker("Start", selection: $start, in: ...Date())
                     if event.source != .instant {
-                        Toggle("Has an end time", isOn: $hasEnd)
+                        // A finished timer always keeps an end time (clearing it would fake "currently pooping").
+                        if !(event.source == .timed && !event.isLive) {
+                            Toggle(event.isLive ? "End this session" : "Has an end time", isOn: $hasEnd)
+                        }
                         if hasEnd {
                             DatePicker("End", selection: $end, in: start...max(start, Date().addingTimeInterval(60)))
                             Text("Duration " + StatsCalculator.formatDurationWords(max(0, end.timeIntervalSince(start))))
@@ -339,6 +344,15 @@ struct EventEditorView: View {
                             pendingLocation = nil
                         }
                     } else {
+                        TextField("Search a place", text: $query)
+                            .onSubmit { Task { results = await model.location.search(query) } }
+                        ForEach(results.prefix(5), id: \.self) { r in
+                            Button(r.label + (r.locality.map { " · " + $0 } ?? "")) {
+                                pendingLocation = r
+                                placeName = r.label
+                                hasLocation = true
+                            }
+                        }
                         Button(locating ? "Locating…" : "Use current location") {
                             locating = true
                             model.location.locateOnce { loc in
@@ -396,6 +410,10 @@ struct EventEditorView: View {
             if event.location != nil { location = .some(nil) }
         } else if var l = pendingLocation ?? event.location {
             let name = placeName.trimmingCharacters(in: .whitespaces)
+            if ContentFilter.isBlocked(name) {
+                model.info("NOT THAT NAME", "Pick a different place name.")
+                return
+            }
             if !name.isEmpty, name != l.label { l.placeName = String(name.prefix(40)) }
             if l != event.location { location = .some(l) }
         }

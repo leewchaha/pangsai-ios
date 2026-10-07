@@ -140,11 +140,13 @@ struct PWMPickerView: View {
 struct PWMLivePanel: View {
     @Environment(AppModel.self) private var model
     var view: LiveSessionView
-    var inviteMore: () -> Void
+    /// nil = watching after my own DONE (no inviting).
+    var inviteMore: (() -> Void)?
     @State private var appearedAt = Date()
 
     var body: some View {
         let reactions = model.store.reactions(zone: view.zone, sessionID: view.session.id, since: appearedAt)
+        let labels = model.store.labels(in: view.zone)
         VStack(spacing: 14) {
             HStack {
                 Text("POOP WITH ME").font(.heading(15)).foregroundStyle(Palette.inkFixed)
@@ -152,14 +154,16 @@ struct PWMLivePanel: View {
                     Text("· \(g.uppercased())").font(.heading(12)).foregroundStyle(Palette.inkFixed.opacity(0.6))
                 }
                 Spacer()
-                Button("+ INVITE", action: inviteMore)
-                    .font(.heading(12))
-                    .foregroundStyle(Palette.inkFixed)
+                if let inviteMore {
+                    Button("+ INVITE", action: inviteMore)
+                        .font(.heading(12))
+                        .foregroundStyle(Palette.inkFixed)
+                }
             }
             let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
             LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(view.participants) { p in
-                    ParticipantTile(participant: p, isMe: p.id == model.store.userID)
+                    ParticipantTile(participant: p, isMe: p.id == model.store.userID, label: labels[p.id])
                 }
             }
             HStack(spacing: 6) {
@@ -185,12 +189,25 @@ struct PWMLivePanel: View {
             model.startPolling(view.zone)
         }
         .onDisappear { model.stopPolling(view.zone) }
+        .onChange(of: Set(view.participants.filter { $0.status == .joined }.map(\.id))) { old, new in
+            // "@sam joined you. You're not alone anymore."
+            for id in new.subtracting(old) where id != model.store.userID {
+                // Only fresh joins (the first poll after opening can include people who joined earlier).
+                guard let started = view.participants.first(where: { $0.id == id })?.startedAt,
+                      Date().timeIntervalSince(started) < 90 else { continue }
+                let who = labels[id] ?? "@" + (view.participants.first { $0.id == id }?.person.handle ?? "someone")
+                model.show(Toast(style: .social, title: "\(who) joined you.".uppercased(), body: Copy.joinedYou(seed: Copy.seed(view.session.id) &+ id.count)))
+                Haptics.play(.success)
+            }
+        }
     }
 }
 
 struct ParticipantTile: View {
     var participant: PWMParticipant
     var isMe: Bool
+    /// Disambiguated handle ("@lee (2)") when two people share a handle here.
+    var label: String? = nil
 
     var body: some View {
         VStack(spacing: 4) {
@@ -200,7 +217,7 @@ struct ParticipantTile: View {
                 if participant.status == .joined { Text("💩").font(.system(size: 18)) }
                 if participant.status == .done { Text("✅").font(.system(size: 16)) }
             }
-            HandleText(handle: isMe ? "you" : participant.person.handle, size: 11, color: Palette.inkFixed)
+            HandleText(handle: isMe ? "you" : (label ?? participant.person.handle), size: 11, color: Palette.inkFixed)
             Group {
                 switch participant.status {
                 case .joined:
@@ -231,6 +248,8 @@ struct ReactionRain: View {
     struct Flying: Identifiable {
         let id: UUID
         var emoji: String
+        /// 💩 reactions fly as the sender's equipped 3D poop (the point of collecting them).
+        var cosmetic: CosmeticID?
         var x: CGFloat
         var launched = false
     }
@@ -239,8 +258,13 @@ struct ReactionRain: View {
         GeometryReader { geo in
             ZStack {
                 ForEach(flying) { f in
-                    Text(f.emoji)
-                        .font(.system(size: 44))
+                    Group {
+                        if let c = f.cosmetic {
+                            Object3DImage(subject: .poop(c), size: 60)
+                        } else {
+                            Text(f.emoji).font(.system(size: 44))
+                        }
+                    }
                         .rotationEffect(.degrees(f.launched ? 200 : 0))
                         .scaleEffect(f.launched ? 1.4 : 0.6)
                         .position(x: geo.size.width * f.x, y: f.launched ? -40 : geo.size.height)
@@ -253,7 +277,7 @@ struct ReactionRain: View {
             guard !new.isEmpty else { return }
             for r in new {
                 shown.insert(r.id)
-                flying.append(Flying(id: r.id, emoji: r.kind.emoji, x: .random(in: 0.15...0.85)))
+                flying.append(Flying(id: r.id, emoji: r.kind.emoji, cosmetic: r.kind == .poop ? (r.cosmetic ?? .classic) : nil, x: .random(in: 0.15...0.85)))
             }
             Haptics.play(.reaction)
             let newIDs = Set(new.map(\.id))
@@ -279,11 +303,12 @@ struct PWMInviteView: View {
     var body: some View {
         let view = model.store.liveSession(sessionID)
         let host = view.flatMap { v in v.participants.first(where: { $0.id == v.session.creatorID })?.person ?? model.store.person(for: v.session.creatorID) }
+        let hostLabel = view.flatMap { v in model.store.labels(in: v.zone)[v.session.creatorID] } ?? host.map { "@" + $0.handle } ?? "Someone"
         VStack(spacing: 18) {
             Spacer()
             Object3DImage(subject: .poop(host?.cosmetic ?? .classic), size: 140)
             if let view {
-                Text("@\(host?.handle ?? "someone")\nWANTS TO POOP WITH YOU")
+                Text("\(hostLabel)\nWANTS TO POOP WITH YOU")
                     .font(.display(26))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Palette.inkFixed)
@@ -323,5 +348,42 @@ struct PWMInviteView: View {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
+    }
+}
+
+// MARK: - Watching after my own DONE
+
+/// The live panel on its own: everyone's timers and reactions, for when I'm done but others aren't.
+struct PWMWatchView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    var sessionID: UUID
+
+    var body: some View {
+        VStack(spacing: 18) {
+            HStack {
+                Spacer()
+                Button("Close") { dismiss() }
+                    .font(.heading(14))
+                    .foregroundStyle(Palette.inkFixed)
+            }
+            if let view = model.store.liveSession(sessionID) {
+                Text("STILL GOING")
+                    .font(.display(28))
+                    .foregroundStyle(Palette.inkFixed)
+                Text("You're done. They're not. Cheer them on.")
+                    .font(.ui(15, .semibold))
+                    .foregroundStyle(Palette.inkFixed.opacity(0.75))
+                PWMLivePanel(view: view, inviteMore: nil)
+            } else {
+                Spacer()
+                Text("EVERYONE'S DONE").font(.display(26)).foregroundStyle(Palette.inkFixed)
+                Text("A functioning society.").font(.ui(15, .semibold)).foregroundStyle(Palette.inkFixed.opacity(0.75))
+            }
+            Spacer()
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.sun.ignoresSafeArea())
     }
 }

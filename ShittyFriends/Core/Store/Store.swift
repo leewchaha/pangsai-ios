@@ -308,6 +308,25 @@ public final class Store {
         liveSessions().first { $0.session.id == id }
     }
 
+    /// Open sessions I already finished while someone else is still pooping (watch + react from TODAY).
+    public func watchableSessions(now: Date? = nil) -> [LiveSessionView] {
+        guard let uid = my.userID else { return [] }
+        return liveSessions(now: now).filter { v in
+            v.participants.first(where: { $0.id == uid })?.status == .done && v.participants.contains { $0.status == .joined }
+        }
+    }
+
+    /// "@lee (1)" / "@lee (2)" labels for everyone visible in one group or session zone. Members are
+    /// ordered by join time; non-member guests after them by user id. Only duplicates get suffixes.
+    public func labels(in zone: ZoneRef) -> [UserID: String] {
+        guard let z = cache.zones[zone] else { return [:] }
+        var people: [UserID: (handle: String, joinedAt: Date)] = [:]
+        for m in z.members.values { people[m.id] = (m.person.handle, m.joinedAt) }
+        for ps in z.participants.values { for p in ps.values where people[p.id] == nil { people[p.id] = (p.person.handle, .distantFuture) } }
+        for rs in z.rsvps.values { for r in rs.values where people[r.id] == nil { people[r.id] = (r.person.handle, .distantFuture) } }
+        return HandleRules.groupLabels(people.map { (id: $0.key, handle: $0.value.handle, joinedAt: $0.value.joinedAt) })
+    }
+
     /// Sessions where I'm invited but haven't joined yet.
     public func pendingInvites(now: Date? = nil) -> [LiveSessionView] {
         guard let uid = my.userID else { return [] }

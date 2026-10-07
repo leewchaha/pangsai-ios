@@ -346,6 +346,7 @@ extension AppModel {
         guard let link = store.my.groupLinks[groupID] else { return }
         store.removeGroupLocal(groupID)
         if link.isOwner { shares.deleteOwned(link.zone) } else { shares.leave(link.zone) }
+        notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
     }
 
     // MARK: - Poop With Me
@@ -436,23 +437,52 @@ extension AppModel {
             return
         }
         if let s = userInfo[NotificationManager.Key.party] as? String, let pid = UUID(uuidString: s) {
-            Task {
-                await refresh()
-                if action == NotificationCategory.actionJoin, let p = store.party(pid), p.party.isJoinable(now: Date()) {
+            if action == NotificationCategory.actionJoin {
+                // JOIN = "I'm pooping now": +1 and the timer start immediately, before any network.
+                if let p = store.party(pid) {
                     joinParty(p)
                 } else {
-                    sheet = .party(pid)
+                    let event = store.startTimed(partyID: pid)
+                    presentSession()
+                    Task {
+                        await refresh()
+                        if let p = store.party(pid) { store.attachToParty(zone: p.zone, partyID: pid, eventID: event.id) }
+                    }
                 }
+                return
+            }
+            Task {
+                await refresh()
+                sheet = .party(pid)
             }
             return
         }
         if let s = userInfo[NotificationManager.Key.session] as? String, let sid = UUID(uuidString: s) {
-            Task {
-                if let share = userInfo[NotificationManager.Key.share] as? String {
-                    try? await joinSpace(url: share, kind: .pwm, expires: Date().addingTimeInterval(6 * 3600))
+            let share = userInfo[NotificationManager.Key.share] as? String
+            if action == NotificationCategory.actionJoin {
+                if store.liveSession(sid) != nil {
+                    joinPWM(sid)
+                } else {
+                    // Count it and start the timer now; attach to the session once it has synced.
+                    let event = store.startTimed(pwmSessionID: sid)
+                    openPWM = sid
+                    presentSession()
+                    Task {
+                        if let share { try? await joinSpace(url: share, kind: .pwm, expires: Date().addingTimeInterval(6 * 3600)) }
+                        await refresh()
+                        if let view = store.liveSession(sid) {
+                            store.attachToPWM(zone: view.zone, sessionID: sid, eventID: event.id)
+                        } else {
+                            info("SESSION ENDED", "Everyone else finished. Your poop still counts.")
+                        }
+                    }
                 }
+                return
+            }
+            Task {
+                if let share { try? await joinSpace(url: share, kind: .pwm, expires: Date().addingTimeInterval(6 * 3600)) }
                 await refresh()
-                if action == NotificationCategory.actionJoin { joinPWM(sid) } else { sheet = .pwmInvite(sid) }
+                sheet = .pwmInvite(sid)
             }
             return
         }
@@ -461,6 +491,12 @@ extension AppModel {
         case "highlights-week": sheet = .highlights(.week, Date().addingTimeInterval(-7 * 24 * 3600))
         case "highlights-month": sheet = .highlights(.month, Date().addingTimeInterval(-15 * 24 * 3600))
         case PingKind.friendRequest.rawValue: tab = .you
+        case "highlights-group":
+            if let raw = userInfo[NotificationManager.Key.group] as? String, let gid = UUID(uuidString: raw), let g = store.group(gid) {
+                sheet = .groupHighlights(g.link.zone)
+            } else {
+                tab = .groups
+            }
         default:
             if store.liveEvent != nil, kind == PingKind.pwmJoin.rawValue { showSession = true }
         }

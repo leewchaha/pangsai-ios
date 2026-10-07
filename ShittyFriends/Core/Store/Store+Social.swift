@@ -212,7 +212,7 @@ public extension Store {
         if let s = shareLocations { l.shareLocations = s }
         l.updatedAt = clock()
         mutateMy { $0.groupLinks[groupID] = l }
-        var effects: [Effect] = [.save(.groupLink(groupID)), .refreshSubscriptions, .refreshDirectory]
+        var effects: [Effect] = [.save(.groupLink(groupID)), .refreshSubscriptions, .refreshDirectory, .rescheduleSummaries]
         if locationChanged || sharingChanged, let uid = my.userID {
             // Re-mirror (adds/removes locations, or adds/removes events) for my events already in the group.
             let mine = cache.zones[l.zone]?.events.values.filter { $0.ownerID == uid } ?? []

@@ -235,14 +235,14 @@ public enum NotificationTextBuilder {
                 body = groupName.map { "\(partyTitle) · \($0)" } ?? partyTitle
             }
         case .friendRequest:
-            title = "\(who) wants to be shitty friends"
-            body = "Open to accept."
+            title = privateMode ? appName : "\(who) wants to be shitty friends"
+            body = privateMode ? "\(who) sent a friend request" : "Open to accept."
         case .friendAccept:
-            title = "\(who) accepted"
-            body = "Finishing the handshake…"
+            title = privateMode ? appName : "\(who) accepted"
+            body = privateMode ? "\(who) accepted your request" : "Finishing the handshake…"
         case .friendComplete:
-            title = "You're shitty friends with \(who)"
-            body = "Histories unlocked."
+            title = privateMode ? appName : "You're shitty friends with \(who)"
+            body = privateMode ? "\(who) is now a friend" : "Histories unlocked."
         }
         if let g = groupName, !privateMode, kind != .poopStart, kind != .poopInstant, kind != .partyInvite {
             body = body.isEmpty ? g : "\(body) · \(g)"

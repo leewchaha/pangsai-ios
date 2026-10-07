@@ -102,10 +102,11 @@ struct PartyDetailView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     SectionTitle("GUEST LIST")
+                    let labels = store.labels(in: p.zone)
                     ForEach(p.rsvps) { r in
                         HStack(spacing: 12) {
                             AvatarView(person: r.person, size: 40)
-                            HandleText(handle: r.person.handle, size: 15)
+                            HandleText(handle: labels[r.id] ?? r.person.handle, size: 15)
                             Spacer()
                             if r.joinedAt != nil {
                                 Text("💩 IN").font(.heading(13))

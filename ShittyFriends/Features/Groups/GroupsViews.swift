@@ -305,6 +305,35 @@ struct GroupDetailView: View {
                     .scrollIndicators(.hidden)
                 }
 
+                let trophies = store.groupAchievements(g.link.zone)
+                SectionTitle("GROUP TROPHIES · \(trophies.filter(\.earned).count)/\(trophies.count)")
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: 12) {
+                        ForEach(trophies) { t in
+                            VStack(spacing: 6) {
+                                Object3DImage(subject: .trophy(t.id.object), size: 64, locked: !t.earned)
+                                Text(t.id.title.uppercased())
+                                    .font(.heading(10))
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(2)
+                                Text(t.earned ? "EARNED" : t.id.detail)
+                                    .font(.ui(10, .medium))
+                                    .foregroundStyle(t.earned ? Palette.inkFixed.opacity(0.7) : Palette.muted)
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(3)
+                            }
+                            .foregroundStyle(t.earned ? Palette.inkFixed : Palette.ink)
+                            .frame(width: 104)
+                            .padding(.vertical, 10)
+                            .sticker(t.earned ? Palette.sun : Palette.card, radius: 18, shadow: 3, stroke: 2)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 2)
+                }
+                .scrollIndicators(.hidden)
+
                 let parties = store.parties().filter { $0.zone == g.link.zone }
                 SectionTitle("POOP PARTIES", trailing: "+ SCHEDULE") { newParty = true }
                 if parties.isEmpty {

@@ -102,6 +102,8 @@ struct SessionView: View {
             .buttonStyle(PressableStyle())
             .accessibilityLabel("Minimize")
             Spacer()
+            undoPill(live)
+            Spacer()
             Button {
                 if live.location != nil { return }
                 if model.location.isAuthorized {
@@ -122,6 +124,29 @@ struct SessionView: View {
         }
         .gutter()
         .padding(.top, 6)
+    }
+
+    /// Short-lived Undo right after starting (mis-taps happen). Deletes the poop entirely.
+    private func undoPill(_ live: PoopEvent) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            if let u = store.undo, u.eventID == live.id, ctx.date.timeIntervalSince(u.at) < Store.undoWindow {
+                Button {
+                    store.performUndo()
+                    Haptics.play(.warning)
+                    dismiss()
+                } label: {
+                    Text("↩︎ UNDO")
+                        .font(.heading(12))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .frame(height: 40)
+                        .sticker(Palette.inkFixed, radius: 14, shadow: 3)
+                }
+                .buttonStyle(PressableStyle())
+                .transition(.scale.combined(with: .opacity))
+                .accessibilityLabel("Undo, didn't mean to start")
+            }
+        }
     }
 
     private func attachLocation(_ id: UUID) {
@@ -310,8 +335,22 @@ struct DoneCard: View {
 
     var body: some View {
         let d = event.duration ?? 0
+        VStack(spacing: 0) {
+            ScrollView {
+                content(d)
+                    .padding(.top, 48)
+                    .padding(.bottom, 16)
+            }
+            .scrollIndicators(.hidden)
+            Button("NICE", action: close)
+                .buttonStyle(.sticker(Palette.sun, height: 64))
+                .gutter()
+                .padding(.bottom, 24)
+        }
+    }
+
+    @ViewBuilder private func content(_ d: TimeInterval) -> some View {
         VStack(spacing: 14) {
-            Spacer()
             Object3DImage(subject: .poop(model.store.profile.equippedCosmetic), size: 150)
             Text("POOP COMPLETE")
                 .font(.display(30))
@@ -329,19 +368,28 @@ struct DoneCard: View {
             }
             .padding(.top, 8)
             if let sid = event.pwmSessionID, let v = model.store.liveSession(sid) {
+                let labels = model.store.labels(in: v.zone)
                 let others = v.participants.filter { $0.id != model.store.userID && ($0.status == .joined || $0.status == .done) }
                 if !others.isEmpty {
-                    Text("WITH " + others.map { "@" + $0.person.handle }.joined(separator: ", ").uppercased())
+                    Text("WITH " + others.map { labels[$0.id] ?? "@" + $0.person.handle }.joined(separator: ", ").uppercased())
+                        .font(.heading(13))
+                        .foregroundStyle(Palette.inkFixed)
+                }
+                if v.participants.contains(where: { $0.status == .joined }) {
+                    // Others are still going: keep watching and reacting from here.
+                    PWMLivePanel(view: v, inviteMore: nil)
+                        .gutter()
+                }
+            } else if let sid = event.pwmSessionID, let archived = model.store.my.pwmArchive[sid] {
+                let others = archived.participants.filter { $0.id != model.store.userID }
+                if !others.isEmpty {
+                    Text("WITH " + others.map { "@" + $0.handle }.joined(separator: ", ").uppercased())
                         .font(.heading(13))
                         .foregroundStyle(Palette.inkFixed)
                 }
             }
-            Spacer()
-            Button("NICE", action: close)
-                .buttonStyle(.sticker(Palette.sun, height: 64))
-                .gutter()
-                .padding(.bottom, 24)
         }
+        .frame(maxWidth: .infinity)
     }
 
     private func stat(_ value: String, _ label: String) -> some View {

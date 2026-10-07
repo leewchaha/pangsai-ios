@@ -70,3 +70,14 @@ Known limits / open product decisions (documented, not bugs):
   sealed; no handles, locations or history). Orphaned pings of uninstalled senders stay until deleted
   manually (they expire logically via `exp`).
 - Live Activity / Dynamic Island, widgets: handoff §45-46 "later", not built.
+
+## Session 2 follow-up (2026-10-07): CI signing error diagnosis
+
+- `ios-testflight` failed at `fetch-signing-files` with `--issuer-id: Missing value ISSUER_ID`.
+- Root cause is an unavailable/empty `APP_STORE_CONNECT_ISSUER_ID` runtime environment variable;
+  the YAML already references the correct `appstore_credentials` group, but the secret
+  must be entered and enabled in Codemagic, not committed to the project.
+- Added a secrets-safe preflight to `codemagic.yaml` before code generation and signing,
+  plus a Codemagic UI troubleshooting guide in `docs/SETUP.md`.
+- No app Swift code, signing identities, or profiles changed; actual TestFlight signing
+  requires the account owner to configure their private credentials in Codemagic.

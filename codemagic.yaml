@@ -2,12 +2,13 @@
 #
 #   ios-check        Build + unit tests on the simulator. No signing, no secrets. Run this first and
 #                    paste the log back if anything fails.
-#   ios-testflight   Signed App Store build, uploaded to TestFlight. Creates/fetches provisioning
-#                    profiles for the app AND the notification extension automatically.
+#   ios-testflight   Signed App Store build, uploaded to TestFlight. Uses the Codemagic
+#                    integration `shittyfriends` and stored signing identities for both targets.
 #   cloudkit-schema  Imports CloudKit/schema.ckdb into the Development environment with cktool.
 #
-# Secrets live in Codemagic environment variable groups (Team or App settings > Environment variables),
-# never in this repo. See docs/SETUP.md for exactly what goes in each group.
+# Secrets live in Codemagic Apple Developer Portal integrations / Code Signing Identities,
+# never in this repo. The optional CloudKit management token uses group `cloudkit`.
+# See docs/SETUP.md for integration + both provisioning profiles.
 
 definitions:
   scripts:
@@ -65,12 +66,17 @@ workflows:
     name: ShittyFriends · TestFlight
     instance_type: mac_mini_m2
     max_build_duration: 90
+    # Uses the Codemagic Apple Developer Portal integration from v0.1.2.
+    # Unlike the former CLI fetch flow, this does not require a separately populated
+    # APP_STORE_CONNECT_ISSUER_ID or CERTIFICATE_PRIVATE_KEY environment variable group.
+    integrations:
+      app_store_connect: shittyfriends
     environment:
       xcode: latest
-      groups:
-        # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER,
-        # APP_STORE_CONNECT_PRIVATE_KEY, CERTIFICATE_PRIVATE_KEY
-        - appstore_credentials
+      ios_signing:
+        distribution_type: app_store
+        # Also selects a matching profile for the embedded NotificationService target.
+        bundle_identifier: com.sakara.shittyfriends
       vars:
         BUNDLE_ID: com.sakara.shittyfriends
         NSE_BUNDLE_ID: com.sakara.shittyfriends.NotificationService
@@ -80,20 +86,28 @@ workflows:
     scripts:
       - *install_xcodegen
       - *generate_project
-      - name: Set up keychain
-        script: keychain initialize
-      - name: Fetch or create signing files (app + notification extension)
-        script: |
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
-          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --create
-      - name: Add certificates to keychain
-        script: keychain add-certificates
-      - name: Apply profiles to the Xcode project
-        script: xcode-project use-profiles
+      # Signing files are fetched from Codemagic Code Signing Identities for both
+      # the app and com.sakara.shittyfriends.NotificationService. Configure both
+      # provisioning profiles + Apple Distribution certificate in the Codemagic UI.
+      - name: Preflight App Store provisioning profiles (both targets)
+        script: python3 scripts/verify_signing_profiles.py
+      - name: Apply App Store signing profiles
+        script: xcode-project use-profiles --project "$XCODE_PROJECT" --archive-method app-store
+      - name: Verify Release signing assignments (both targets)
+        script: python3 scripts/verify_signing_profiles.py --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME" --check-assignments
       - name: Set build number
         script: |
-          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
-          case "$LATEST" in ''|*[!0-9]*) LATEST=0 ;; esac
+          # Never turn authentication/API failures into build 1, which may collide
+          # with an existing TestFlight build. Empty *successful* result means new app.
+          set -eu
+          if ! LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID"); then
+            echo 'ERROR: Cannot query TestFlight build number. Check the Codemagic app_store_connect integration named shittyfriends.' >&2
+            exit 1
+          fi
+          LATEST=${LATEST:-0}
+          case "$LATEST" in
+            *[!0-9]*) echo "ERROR: Invalid TestFlight build number (not numeric)." >&2; exit 1 ;;
+          esac
           NEXT=$((LATEST + 1))
           echo "Build number: $NEXT"
           agvtool new-version -all "$NEXT"
@@ -108,9 +122,7 @@ workflows:
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
     publishing:
       app_store_connect:
-        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
-        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
-        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        auth: integration
         submit_to_testflight: true
         submit_to_app_store: false
 
@@ -128,15 +140,42 @@ workflows:
     scripts:
       - name: Validate and import schema into Development
         script: |
-          set -e
+          set -euo pipefail
+          # CKTool expects a CloudKit *management* token, not the App Store Connect
+          # API key used by the separate ios-testflight workflow. Passing it via
+          # the environment avoids including the secret in process arguments.
+          if [ -z "${CLOUDKIT_MANAGEMENT_TOKEN:-}" ]; then
+            echo 'ERROR: Missing CLOUDKIT_MANAGEMENT_TOKEN in Codemagic environment group "cloudkit".' >&2
+            echo 'Generate a management token in CloudKit Console > account Settings.' >&2
+            echo 'Add it as a Secret environment variable with the exact name CLOUDKIT_MANAGEMENT_TOKEN, in group cloudkit.' >&2
+            echo 'This workflow is independent of ios-testflight; the Apple Developer Portal integration cannot supply this token.' >&2
+            exit 2
+          fi
+          if [ -z "${TEAM_ID:-}" ]; then
+            echo 'ERROR: Missing TEAM_ID in Codemagic environment group "cloudkit" (your 10-character Apple Developer Team ID).' >&2
+            exit 2
+          fi
+          if ! [[ "$TEAM_ID" =~ ^[A-Za-z0-9]{10}$ ]]; then
+            echo 'ERROR: TEAM_ID must be your 10-character Apple Developer Team ID, not the Issuer ID or API Key ID.' >&2
+            exit 2
+          fi
+          if [ ! -f CloudKit/schema.ckdb ]; then
+            echo 'ERROR: CloudKit/schema.ckdb is missing from the checkout or the workflow started in the wrong directory.' >&2
+            exit 2
+          fi
+          echo "Validating CloudKit schema for $CONTAINER_ID (Development)..."
+          # cktool reads CLOUDKIT_MANAGEMENT_TOKEN directly from the environment.
+          # Do not echo the token, enable shell tracing, or pass it using --token.
           xcrun cktool validate-schema \
             --team-id "$TEAM_ID" \
             --container-id "$CONTAINER_ID" \
             --environment development \
             --file CloudKit/schema.ckdb
+          echo "Validation succeeded; importing into Development..."
           xcrun cktool import-schema \
             --team-id "$TEAM_ID" \
             --container-id "$CONTAINER_ID" \
             --environment development \
             --file CloudKit/schema.ckdb
-          echo "Imported. Now open CloudKit Console > Schema > Deploy Schema Changes to push it to Production."
+          echo 'Schema import succeeded (Development only).'
+          echo 'Next: CloudKit Console > Schema > Deploy Schema Changes to Production (manual, review before deploying).'

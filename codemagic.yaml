@@ -70,7 +70,7 @@ workflows:
     # Unlike the former CLI fetch flow, this does not require a separately populated
     # APP_STORE_CONNECT_ISSUER_ID or CERTIFICATE_PRIVATE_KEY environment variable group.
     integrations:
-      app_store_connect: shittyfriends
+      app_store_connect: Wall App Store Connect Key
     environment:
       xcode: latest
       ios_signing:

@@ -138,6 +138,12 @@ workflows:
       vars:
         CONTAINER_ID: iCloud.com.sakara.shittyfriends
     scripts:
+
+      - name: Verify CloudKit authentication
+        script: |
+          echo "Checking CloudKit authentication..."
+          xcrun cktool get-teams
+
       - name: Validate and import schema into Development
         script: |
           set -euo pipefail

@@ -114,7 +114,7 @@ struct SettingsView: View {
             Section {
                 Button("Delete all my data", role: .destructive) { confirmDelete = true }
             } footer: {
-                Text("Deletes your history, groups you own and your shares from iCloud and this device. If other devices use this iCloud account, delete the app there too.")
+                Text("Deletes your history, groups you own and your shares from iCloud and this device. Your other devices on this iCloud account clear their copy too.")
             }
 
             Section("ABOUT") {

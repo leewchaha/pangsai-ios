@@ -196,7 +196,7 @@ final class PingService {
             persist()
             log.info("saved \(toSave.count) ping subscriptions, deleted \(toDelete.count)")
         } catch {
-            // Typical first-run cause: the Ping record type/indexes aren't deployed yet (see CloudKit/README.md).
+            // Typical first-run cause: the Ping record type/indexes aren't deployed yet (see docs/SETUP.md §4).
             log.error("subscription refresh failed: \(error.localizedDescription, privacy: .public)")
         }
     }

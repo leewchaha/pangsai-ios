@@ -1982,7 +1982,7 @@ Do not make it mandatory for the first prototype.
 14. No central ShittyFriends user database.
 15. No global username uniqueness dependency.
 16. Duplicate handles use temporary `(1)`, `(2)` labels within conflicting groups.
-17. Points reward interaction, not increased bowel frequency.
+17. Points reward tapping interaction inside timed sessions. Every timed session can earn points; there is no daily earning cap, but each session remains capped.
 18. The app must stay funny and tactile rather than clinical.
 19. 3D objects and motion are a first-class product feature.
 20. Notifications must be easy to silence.
@@ -2010,8 +2010,8 @@ Need balancing:
 
 - point-per-tap
 - session cap
-- daily cap
-- cosmetic pricing
+- no daily cap (confirmed)
+- cosmetic pricing (scaled upward for the uncapped-per-day economy)
 - streak bonus
 - rarity
 

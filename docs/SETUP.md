@@ -163,7 +163,13 @@ If `ios-testflight` fails, distinguish the causes:
 ## 4. CloudKit schema (must be in **Production** before TestFlight works)
 
 TestFlight and App Store builds talk to the **Production** CloudKit environment, which can't
-auto-create record types. The schema has to be imported into Development, then deployed.
+auto-create record types. The custom schema has to be imported into Development, then deployed.
+
+**CKShare has one extra one-time step.** Apple's system `cloudkit.share` type is not defined by
+`CloudKit/schema.ckdb`. Run a development-signed Debug build on an iCloud device once; the app's
+DEBUG bootstrap originates a real history share in Development. Then deploy the resulting sharing
+schema to Production. See `docs/CLOUDKIT_SHARING_PRODUCTION_FIX.md`. Importing `schema.ckdb` alone
+does not fix `Cannot create new type cloudkit.share in production schema`.
 
 ### 4.1 Import into Development (pick one)
 - **Codemagic:** run the `cloudkit-schema` workflow (requires `CLOUDKIT_MANAGEMENT_TOKEN` and `TEAM_ID` in the `cloudkit` group; setup in §3.2).
@@ -203,7 +209,7 @@ TestFlight build → install on both phones (each signed in to its **own** iClou
 on). Then go through:
 
 1. Onboard both. Log a double-tap poop offline (airplane mode), relaunch, go online → it syncs.
-2. Phone A: Today → 👥 → share invite → Phone B opens the link → request → Phone A accepts → both see
+2. Phone A: Home → 👥 → share invite → Phone B opens the link → request → Phone A accepts → both see
    each other's full calendar (including old entries) and "currently pooping" bubbles.
 3. Phone A single-taps POOPING → Phone B gets "💩 @a is pooping" (also with B's app killed).
 4. Poop With Me: A invites B → B taps **JOIN** on the notification → B's +1 and timer start

@@ -8,6 +8,12 @@ struct SettingsView: View {
     @State private var importing = false
     @State private var confirmDelete = false
     @State private var notificationsAllowed = true
+    @State private var locationDeniedAlert = false
+    @Environment(\.scenePhase) private var scenePhase
+    /// Bumped when the app returns to the foreground so the iOS-permission row re-reads its state
+    /// (LocationService isn't observable; the user may have just changed it in iOS Settings).
+    @State private var permissionRefresh = 0
+    @AppStorage("sf.map.showProfileBadges") private var showProfileBadges = true
 
     private var store: Store { model.store }
 
@@ -61,21 +67,30 @@ struct SettingsView: View {
             }
 
             Section {
-                Toggle("Attach location by default", isOn: Binding(get: { store.settings.attachLocationByDefault }, set: { v in
-                    if v {
-                        Task {
-                            let ok = await model.location.requestAuthorization()
-                            store.updateSettings { $0.attachLocationByDefault = ok; $0.locationPrompted = true }
-                        }
-                    } else {
-                        store.updateSettings { $0.attachLocationByDefault = false }
-                    }
-                }))
+                // Every poop is pinned; this row only reports (and fixes) the iOS permission.
+                HStack {
+                    Text("Location")
+                    Spacer()
+                    let _ = permissionRefresh
+                    Text(model.location.isAuthorized ? "Allowed" : (model.location.isDenied ? "Off in iOS Settings" : "Asks on your next poop"))
+                        .foregroundStyle(.secondary)
+                }
+                if model.location.isDenied {
+                    Button("Turn location back on") { locationDeniedAlert = true }
+                }
                 Toggle("“Still pooping?” reminder", isOn: binding(\.longSessionReminder))
             } header: {
                 Text("POOPING")
             } footer: {
-                Text("Location is only captured when a poop is logged, never in the background. Friends see locations attached to your poops until you edit or delete them.")
+                Text("Every poop gets a pin on the map. Location is only read when a poop is logged, never in the background. Friends see your pins; groups only see them if you turn on “Include locations” for that group.")
+            }
+
+            Section {
+                Toggle("Show profile badges on poop pins", isOn: $showProfileBadges)
+            } header: {
+                Text("MAP")
+            } footer: {
+                Text("Shows a small avatar on the newest person's poop pin. Turn off for poop-only pins. No photo uploads are required.")
             }
 
             if !store.settings.blockedUserIDs.isEmpty {
@@ -104,11 +119,11 @@ struct SettingsView: View {
                 if let url = exportURL {
                     ShareLink(item: url) { Label("Share export (.zip)", systemImage: "square.and.arrow.up") }
                 }
-                Button("Import history (poop-history.json)") { importing = true }
+                Button("Import history from an export") { importing = true }
             } header: {
                 Text("YOUR DATA")
             } footer: {
-                Text("Your data lives on this device and in your own iCloud. ShittyFriends has no server with your poop history.")
+                Text("Your data lives on this device and in your own iCloud. ShittyFriends has no server with your poop history. Import takes the export .zip as-is (or the poop-history.json inside it); imported poops never bring points.")
             }
 
             Section {
@@ -123,6 +138,11 @@ struct SettingsView: View {
                 Text(Copy.tagline).foregroundStyle(.secondary)
             }
         }
+        // The app's global tint is adaptive ink (nearly white in dark mode),
+        // which made enabled UISwitch tracks indistinguishable from their thumbs.
+        // Keep a saturated, legible track color independent of appearance.
+        .tint(Palette.violet)
+        .clearsTabBar()
         .navigationTitle("SETTINGS")
         .navigationBarTitleDisplayMode(.inline)
         .task {
@@ -130,7 +150,7 @@ struct SettingsView: View {
             let s = model.notifications.authorization
             notificationsAllowed = s == .authorized || s == .provisional || s == .ephemeral
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.zip, .json]) { result in
             switch result {
             case .success(let url):
                 do {
@@ -142,6 +162,17 @@ struct SettingsView: View {
             case .failure(let error):
                 model.error("Import failed", error)
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { permissionRefresh += 1 }
+        }
+        .alert("Location is off in iOS Settings", isPresented: $locationDeniedAlert) {
+            Button("Open iOS Settings") {
+                if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+            }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Poops can't get map pins until location is allowed for ShittyFriends in iOS Settings.")
         }
         .confirmationDialog("Delete everything?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete all my data", role: .destructive) {

@@ -141,4 +141,21 @@ final class ExportAndMeshTests: XCTestCase {
             try obj.write(toFile: dir + "/\(name).obj", atomically: true, encoding: .utf8)
         }
     }
+
+    func testImportCanReadHistoryStraightFromTheExportZip() throws {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        store.logInstant()
+        clock.advance(60)
+        store.addManual(at: clock.now.addingTimeInterval(-3600), duration: 120, location: nil)
+        let zip = try ExportBuilder.zip(store: store, now: clock.now)
+        XCTAssertTrue(ZipReader.looksLikeZip(zip))
+        let json = try ZipReader.file(named: "poop-history.json", in: zip)
+        let parsed = try ExportBuilder.parseHistory(json)
+        XCTAssertEqual(parsed.count, 2)
+        XCTAssertThrowsError(try ZipReader.file(named: "missing.json", in: zip)) {
+            XCTAssertEqual($0 as? ZipReader.ZipError, .entryMissing)
+        }
+        XCTAssertFalse(ZipReader.looksLikeZip(json))
+    }
 }

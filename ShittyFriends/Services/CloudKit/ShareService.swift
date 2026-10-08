@@ -106,6 +106,21 @@ final class ShareService {
 
     // MARK: - My history ("Me" zone)
 
+    /// DEBUG-only bootstrap for Apple's system `cloudkit.share` record type. CloudKit creates that
+    /// type only after a real share is saved in the Development environment; it must then be deployed
+    /// once to Production before TestFlight/App Store builds can originate shares.
+    func bootstrapDevelopmentSharingSchema() async {
+        #if DEBUG
+        do {
+            _ = try await mutateShare(.me, create: makeMeShare) { _ in false }
+            log.info("development sharing schema bootstrap completed")
+        } catch {
+            // A Debug build can still be pointed at Production; never surface this maintenance attempt.
+            log.debug("development sharing schema bootstrap skipped/failed: \(error.localizedDescription, privacy: .public)")
+        }
+        #endif
+    }
+
     private func makeMeShare() -> CKShare {
         let share = CKShare(recordZoneID: ZoneRef.me.zoneID)
         share.publicPermission = .none

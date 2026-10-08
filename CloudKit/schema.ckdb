@@ -1,6 +1,9 @@
 // ShittyFriends CloudKit schema (container iCloud.com.sakara.shittyfriends).
 // Import into Development with cktool (see CloudKit/README.md), then use
 // CloudKit Console > Deploy Schema Changes to push it to Production.
+// NOTE: Apple's `cloudkit.share` system type is NOT defined in this file. It is created by
+// successfully originating a CKShare in the Development environment, then deploying the
+// resulting sharing schema to Production. See docs/CLOUDKIT_SHARING_PRODUCTION_FIX.md.
 DEFINE SCHEMA
 
     RECORD TYPE Users (

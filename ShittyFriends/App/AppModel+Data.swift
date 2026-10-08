@@ -1,3 +1,4 @@
+import Compression
 import Foundation
 import os
 
@@ -16,13 +17,31 @@ extension AppModel {
         return url
     }
 
-    /// Imports poop-history.json from a previous export. Returns the number of new poops.
+    /// Imports a previous export: the .zip itself, or the poop-history.json inside it.
+    /// Returns the number of new poops.
     func importHistory(from url: URL) throws -> Int {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let data = try Data(contentsOf: url)
+        var data = try Data(contentsOf: url)
+        if ZipReader.looksLikeZip(data) {
+            data = try ZipReader.file(named: "poop-history.json", in: data, inflate: AppModel.inflateRawDeflate)
+        }
         let events = try ExportBuilder.parseHistory(data)
         return store.importHistory(events)
+    }
+
+    /// Raw DEFLATE (zip method 8) via Apple's Compression; for exports the user re-zipped in Files/Finder.
+    nonisolated static func inflateRawDeflate(_ data: Data, expectedSize: Int) -> Data? {
+        guard expectedSize > 0, expectedSize < 200_000_000, !data.isEmpty else { return nil }
+        var out = Data(count: expectedSize)
+        let written = out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
+            data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Int in
+                guard let d = dst.bindMemory(to: UInt8.self).baseAddress,
+                      let s = src.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(d, expectedSize, s, data.count, nil, COMPRESSION_ZLIB)
+            }
+        }
+        return written == expectedSize ? out : nil
     }
 
     /// Deletes everything this app stored for me: local files, my iCloud zones (history, settings,

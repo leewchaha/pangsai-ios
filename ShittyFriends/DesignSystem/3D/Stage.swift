@@ -70,7 +70,7 @@ final class RenderCache {
 
     private(set) var images: [String: UIImage] = [:]
     @ObservationIgnored private var inFlight = Set<String>()
-    @ObservationIgnored private let queue = DispatchQueue(label: "com.sakara.shittyfriends.render", qos: .userInitiated)
+    @ObservationIgnored private let queue = DispatchQueue(label: "com.sakara.shittyfriends.render", qos: .utility)
     @ObservationIgnored private let device = MTLCreateSystemDefaultDevice()
 
     enum Subject: Hashable, Sendable {
@@ -126,11 +126,10 @@ final class RenderCache {
         }
     }
 
-    /// Warm up the most visible renders right after launch.
-    func prewarm() {
-        for id in CosmeticID.allCases { request(.poop(id)) }
-        for t in TrophyObject.allCases { request(.trophy(t)) }
-        for g in GroupObject.allCases { request(.group(g)) }
+    /// Optional targeted warm-up for a screen that knows what it will show next.
+    /// Never call this for the entire catalogue during cold launch.
+    func prewarm(_ subjects: [Subject]) {
+        for subject in subjects { request(subject) }
     }
 }
 
@@ -148,6 +147,11 @@ struct Object3DImage: View {
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
+            } else if case .poop = subject {
+                // A neutral placeholder avoids flashing a facial-featured emoji while the
+                // genuine faceless 3D image is rendered off the main thread.
+                ProgressView()
+                    .tint(Palette.poop)
             } else {
                 Text(placeholder)
                     .font(.system(size: size * 0.6))
@@ -162,7 +166,7 @@ struct Object3DImage: View {
 
     private var placeholder: String {
         switch subject {
-        case .poop: return "💩"
+        case .poop: return ""
         case .trophy: return "🏆"
         case .group(let g): return g.emoji
         }

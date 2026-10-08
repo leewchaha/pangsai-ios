@@ -11,6 +11,8 @@ struct CalendarScreen: View {
 
     @State private var selectedSubject: CalendarSubject = .me
     @State private var month = MonthKey(Date(), calendar: CalendarMath.standard())
+    /// +1 = moved to a later month (slides in from the right), -1 = earlier.
+    @State private var slideDirection = 1
     @State private var selectedDay: DayKey? = DayKey(Date(), calendar: CalendarMath.standard())
     @State private var editing: PoopEvent?
     @State private var addingMissed = false
@@ -37,10 +39,10 @@ struct CalendarScreen: View {
         let cal = store.calendar
         let byDay = Dictionary(grouping: events) { DayKey($0.startedAt, calendar: cal) }
         let content = ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
                 if subject == .me { subjectPicker }
                 monthHeader
-                MonthGrid(month: month, byDay: byDay, selected: $selectedDay, accent: accent, calendar: cal)
+                monthPager(byDay: byDay, calendar: cal)
                 monthStats(byDay: byDay)
                 if let day = selectedDay {
                     dayDetail(day, events: (byDay[day] ?? []).sorted { $0.startedAt < $1.startedAt })
@@ -51,13 +53,18 @@ struct CalendarScreen: View {
                     } label: {
                         Label("ADD MISSED POOP", systemImage: "plus")
                     }
-                    .buttonStyle(.sticker(Palette.card, ink: Palette.ink, height: 52))
+                    .font(.heading(11))
+                    .foregroundStyle(Palette.ink)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .calmSurface(Palette.card, radius: 16)
+                    .buttonStyle(PressableStyle())
                 }
             }
             .gutter()
             .padding(.vertical, 12)
         }
         .scrollIndicators(.hidden)
+        .clearsTabBar()
         .background(Palette.paper.ignoresSafeArea())
         .sheet(item: $editing) { e in EventEditorView(event: e).environment(model) }
         .sheet(isPresented: $addingMissed) { AddMissedView(defaultDay: selectedDay).environment(model) }
@@ -66,6 +73,45 @@ struct CalendarScreen: View {
             NavigationStack { content.toolbar(.hidden, for: .navigationBar) }
         } else {
             content.navigationTitle("CALENDAR").navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    /// One month at a time, only as many week rows as the month needs (no empty 6th row).
+    /// Swipe left/right (or the chevrons) to change month; taps still select days.
+    private func monthPager(byDay: [DayKey: [PoopEvent]], calendar: Calendar) -> some View {
+        MonthGrid(month: month, byDay: byDay, selected: $selectedDay, accent: accent, calendar: calendar)
+            .id(month)
+            .transition(.asymmetric(
+                insertion: .move(edge: slideDirection > 0 ? .trailing : .leading).combined(with: .opacity),
+                removal: .move(edge: slideDirection > 0 ? .leading : .trailing).combined(with: .opacity)
+            ))
+            .frame(maxWidth: .infinity)
+            .clipped()
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 24)
+                    .onEnded { value in
+                        let dx = value.translation.width
+                        guard abs(dx) > 50, abs(dx) > abs(value.translation.height) * 1.5 else { return }
+                        moveMonth(by: dx < 0 ? 1 : -1)
+                    }
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityHint("Swipe left or right to change month")
+    }
+
+    private func moveMonth(by delta: Int) {
+        Haptics.tick()
+        // Direction first, month on the next turn: the outgoing grid must render once with the new
+        // direction, or reversing direction slides it out the wrong way.
+        slideDirection = delta >= 0 ? 1 : -1
+        DispatchQueue.main.async {
+            withAnimation(Motion.snappy) {
+                month = month.adding(months: delta)
+                // Don't show the previous month's day log under the new month.
+                if let day = selectedDay, day.year != month.year || day.month != month.month {
+                    selectedDay = nil
+                }
+            }
         }
     }
 
@@ -91,7 +137,7 @@ struct CalendarScreen: View {
         let cal = store.calendar
         let date = cal.date(from: DateComponents(year: month.year, month: month.month, day: 1)) ?? Date()
         return HStack {
-            Button { withAnimation(Motion.snappy) { month = month.adding(months: -1) } } label: {
+            Button { moveMonth(by: -1) } label: {
                 Image(systemName: "chevron.left").font(.system(size: 18, weight: .black)).frame(width: 44, height: 44)
             }
             Spacer()
@@ -100,7 +146,7 @@ struct CalendarScreen: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Spacer()
-            Button { withAnimation(Motion.snappy) { month = month.adding(months: 1) } } label: {
+            Button { moveMonth(by: 1) } label: {
                 Image(systemName: "chevron.right").font(.system(size: 18, weight: .black)).frame(width: 44, height: 44)
             }
         }
@@ -111,12 +157,17 @@ struct CalendarScreen: View {
         let cal = store.calendar
         let date = cal.date(from: DateComponents(year: month.year, month: month.month, day: 15)) ?? Date()
         let s = StatsCalculator.compute(events, in: CalendarMath.monthInterval(date, calendar: cal), now: Date(), calendar: cal)
-        return HStack(spacing: 10) {
-            StatTile(value: "\(s.total)", label: "POOPS", fill: accent.color)
-            StatTile(value: "\(s.activeDays)", label: "DAYS")
-            StatTile(value: s.longestSession.map { StatsCalculator.formatDuration($0) } ?? "—", label: "LONGEST")
-            StatTile(value: "\(s.uniquePlaces)", label: "PLACES")
+        return HStack(spacing: 0) {
+            CalendarMetric(value: "\(s.total)", label: "POOPS", accent: accent.color)
+            Divider().frame(height: 30)
+            CalendarMetric(value: "\(s.activeDays)", label: "DAYS", accent: Palette.lime)
+            Divider().frame(height: 30)
+            CalendarMetric(value: s.longestSession.map { StatsCalculator.formatDuration($0) } ?? "—", label: "LONGEST", accent: Palette.sun)
+            Divider().frame(height: 30)
+            CalendarMetric(value: "\(s.uniquePlaces)", label: "PLACES", accent: Palette.aqua)
         }
+        .padding(.vertical, 10)
+        .calmSurface(Palette.card, radius: 18)
     }
 
     private func dayDetail(_ day: DayKey, events: [PoopEvent]) -> some View {
@@ -150,6 +201,24 @@ struct CalendarScreen: View {
     }
 }
 
+
+struct CalendarMetric: View {
+    var value: String
+    var label: String
+    var accent: Color
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(value).font(.digits(18)).foregroundStyle(Palette.ink).lineLimit(1).minimumScaleFactor(0.5)
+            HStack(spacing: 3) {
+                Circle().fill(accent).frame(width: 5, height: 5)
+                Text(label).font(.heading(9)).foregroundStyle(Palette.muted).lineLimit(1).minimumScaleFactor(0.8)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 // MARK: - Grid
 
 struct MonthGrid: View {
@@ -160,87 +229,91 @@ struct MonthGrid: View {
     var calendar: Calendar
 
     var body: some View {
-        let cells = CalendarMath.monthGrid(month, calendar: calendar)
+        // Only the rows this month needs (4–6), so short months don't leave a blank band.
+        let cells: [DayKey?] = CalendarMath.monthGrid(month, calendar: calendar)
         let today = DayKey(Date(), calendar: calendar)
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 7)
-        VStack(spacing: 8) {
-            HStack(spacing: 6) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
+        VStack(spacing: 6) {
+            HStack(spacing: 4) {
                 ForEach(["M", "T", "W", "T", "F", "S", "S"].indices, id: \.self) { i in
                     Text(["M", "T", "W", "T", "F", "S", "S"][i])
-                        .font(.heading(12))
+                        .font(.heading(10))
                         .foregroundStyle(Palette.muted)
                         .frame(maxWidth: .infinity)
                 }
             }
-            LazyVGrid(columns: columns, spacing: 6) {
+            LazyVGrid(columns: columns, spacing: 4) {
                 ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
                     if let day = cell {
-                        DayCell(day: day, count: byDay[day]?.count ?? 0, social: byDay[day]?.contains { $0.pwmSessionID != nil || $0.partyID != nil } ?? false, located: byDay[day]?.contains { $0.location != nil } ?? false, isToday: day == today, isSelected: day == selected, accent: accent)
+                        let dayEvents = byDay[day] ?? []
+                        DayCell(day: day, count: dayEvents.count, social: dayEvents.contains { $0.pwmSessionID != nil || $0.partyID != nil }, isToday: day == today, isSelected: day == selected, accent: accent)
                             .onTapGesture {
                                 Haptics.tick()
                                 withAnimation(Motion.snappy) { selected = day }
                             }
                     } else {
-                        Color.clear.frame(height: 58)
+                        Color.clear.frame(height: DayCell.height)
                     }
                 }
             }
         }
-        .padding(10)
-        .sticker(Palette.card, radius: 24, shadow: 4)
+        .padding(8)
+        .calmSurface(Palette.card, radius: 20)
     }
 }
 
 struct DayCell: View {
+    static let height: CGFloat = 42
+
     var day: DayKey
     var count: Int
+    /// Poop With Me / party that day: a small pink corner dot.
     var social: Bool
-    var located: Bool
     var isToday: Bool
     var isSelected: Bool
     var accent: IdentityColor
 
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 1) {
             Text("\(day.day)")
-                .font(.heading(12))
+                .font(.heading(11))
                 .foregroundStyle(isSelected ? accent.ink : Palette.ink)
-            ZStack {
-                ForEach(0..<min(count, 3), id: \.self) { i in
-                    Circle()
-                        .fill(Palette.poop)
-                        .overlay(Circle().strokeBorder(Palette.line, lineWidth: 1.2))
-                        .frame(width: 14 - CGFloat(i) * 2.5, height: 14 - CGFloat(i) * 2.5)
-                        .offset(y: CGFloat(-i) * 7 + 6)
+            HStack(alignment: .center, spacing: -3) {
+                // Object3DImage uses the shared cached snapshot. Repeating it in
+                // calendar cells never creates live SceneKit renderers per day.
+                ForEach(0..<min(count, 3), id: \.self) { _ in
+                    Object3DImage(subject: .poop(.classic), size: count >= 3 ? 11 : 13)
                 }
                 if count > 3 {
-                    Text("\(count)")
-                        .font(.heading(9))
-                        .foregroundStyle(.white)
-                        .padding(3)
-                        .background(Circle().fill(Palette.tomato))
-                        .offset(x: 12, y: -8)
+                    // Up to three poops are drawn; the rest is an exact "+n" (never a "?").
+                    Text("+\(count - 3)")
+                        .font(.system(size: 9, weight: .black, design: .rounded))
+                        .foregroundStyle(isSelected ? accent.ink : Palette.ink)
+                        .padding(.leading, 3)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .accessibilityHidden(true)
                 }
             }
-            .frame(height: 30)
-            HStack(spacing: 2) {
-                if social { Circle().fill(Palette.pink).frame(width: 5, height: 5) }
-                if located { Circle().fill(Palette.aqua).frame(width: 5, height: 5) }
-            }
-            .frame(height: 5)
+            .frame(maxWidth: .infinity, minHeight: 15)
         }
-        .frame(maxWidth: .infinity, minHeight: 58)
+        .frame(maxWidth: .infinity, minHeight: DayCell.height, maxHeight: DayCell.height)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isSelected ? accent.color : (count > 0 ? accent.color.opacity(0.18) : Color.clear))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(isToday ? Palette.line : Color.clear, lineWidth: 2)
         )
+        .overlay(alignment: .topTrailing) {
+            if social {
+                Circle().fill(Palette.pink).frame(width: 6, height: 6).padding(4)
+            }
+        }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(day.day), \(count) poops")
+        .accessibilityLabel("\(day.day), \(count) poops\(social ? ", with friends" : "")")
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
     }
 }
@@ -290,7 +363,7 @@ struct EventRow: View {
             }
         }
         .padding(12)
-        .sticker(Palette.card, radius: 18, shadow: 3, stroke: 2)
+        .calmSurface(Palette.card, radius: 16)
     }
 }
 
@@ -338,11 +411,8 @@ struct EventEditorView: View {
                 }
                 Section("WHERE") {
                     if hasLocation {
+                        // Pins can be renamed, never removed: every poop is on the map.
                         TextField("Place name", text: $placeName)
-                        Button("Remove location", role: .destructive) {
-                            hasLocation = false
-                            pendingLocation = nil
-                        }
                     } else {
                         TextField("Search a place", text: $query)
                             .onSubmit { Task { results = await model.location.search(query) } }
@@ -355,20 +425,28 @@ struct EventEditorView: View {
                         }
                         Button(locating ? "Locating…" : "Use current location") {
                             locating = true
-                            model.location.locateOnce { loc in
-                                locating = false
-                                guard let loc else {
-                                    model.info("NO LOCATION", "Couldn't get a fix. Try again outside.")
+                            Task {
+                                // Asks iOS the first time; a denied permission is handled below.
+                                guard await model.location.requestAuthorization() else {
+                                    locating = false
                                     return
                                 }
-                                pendingLocation = loc
-                                placeName = loc.label
-                                hasLocation = true
+                                model.location.locateOnce { loc in
+                                    locating = false
+                                    guard let loc else {
+                                        model.info("NO LOCATION", "Couldn't get a fix. Try again outside.")
+                                        return
+                                    }
+                                    pendingLocation = loc
+                                    placeName = loc.label
+                                    hasLocation = true
+                                }
                             }
                         }
-                        .disabled(!model.location.isAuthorized || locating)
-                        if !model.location.isAuthorized {
-                            Text("Allow location in Settings to attach one.").font(.footnote).foregroundStyle(.secondary)
+                        .disabled(model.location.isDenied || locating)
+                        if model.location.isDenied {
+                            Text("Location is off for ShittyFriends in iOS Settings. Search a place instead, or turn it back on.").font(.footnote).foregroundStyle(.secondary)
+                            OpenSystemSettingsButton()
                         }
                     }
                 }
@@ -392,6 +470,8 @@ struct EventEditorView: View {
                     model.store.delete(event.id)
                     dismiss()
                 }
+            } message: {
+                Text(event.halfPoints > 0 ? "It disappears from your history and your friends'. The \(formatHalfPoints(event.halfPoints)) points it earned stay yours." : "It disappears from your history and your friends'.")
             }
             .onAppear {
                 start = event.startedAt
@@ -456,7 +536,7 @@ struct AddMissedView: View {
                         HStack {
                             Text("📍 " + l.label)
                             Spacer()
-                            Button("Remove") { location = nil }
+                            Button("Change") { location = nil }
                         }
                     } else {
                         TextField("Search a place", text: $query)

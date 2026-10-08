@@ -57,7 +57,27 @@ public extension Store {
         switch record {
         case .profile(let p):
             if (my.profile?.updatedAt ?? .distantPast) <= p.updatedAt {
-                mutateMy { $0.profile = p; $0.onboarded = true }
+                // Never erase paid shine ownership when an older client syncs a profile
+                // lacking the new fields. Purchases are append-only.
+                var incoming = p
+                let old = my.profile
+                for (id, purchase) in old?.pinShines ?? [:] where incoming.pinShines[id] == nil {
+                    incoming.pinShines[id] = purchase
+                }
+                if p.pinShines.isEmpty, let old, old.equippedPinShine != .classicWhite {
+                    incoming.equippedPinShine = old.equippedPinShine
+                }
+                // Banked points only ever grow: an older client (no field) or a device that hasn't
+                // seen a delete yet must not shrink them.
+                incoming.bankedHalfPoints = max(incoming.bankedHalfPoints, old?.bankedHalfPoints ?? 0)
+                mutateMy { $0.profile = incoming; $0.onboarded = true }
+                if incoming != p { emit([.save(.profile)]) }
+            } else if var local = my.profile, p.bankedHalfPoints > local.bankedHalfPoints {
+                // An older profile can still carry a bank made on another device: keep the larger.
+                local.bankedHalfPoints = p.bankedHalfPoints
+                local.updatedAt = max(local.updatedAt, clock())
+                mutateMy { $0.profile = local }
+                emit([.save(.profile)])
             }
         case .event(let e):
             if let local = my.events[e.id], local.updatedAt > e.updatedAt { return false }

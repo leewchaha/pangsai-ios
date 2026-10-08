@@ -1,4 +1,5 @@
 import SwiftUI
+import MapKit
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
@@ -18,24 +19,28 @@ struct RootView: View {
 /// Tabs + global overlays (toasts, busy indicator, live-session bar) + global sheets.
 struct MainShell: View {
     @Environment(AppModel.self) private var model
+    @State private var bottomChromeHeight: CGFloat = 72
+    @State private var homeCamera: MapCameraPosition = .automatic
+    @State private var homeCameraInitialized = false
 
     var body: some View {
         @Bindable var model = model
         ZStack(alignment: .bottom) {
             Group {
                 switch model.tab {
-                case .today: TodayView()
-                case .map: PoopMapView()
+                case .home: HomeView(position: $homeCamera, cameraInitialized: $homeCameraInitialized)
                 case .groups: GroupsView()
                 case .calendar: CalendarScreen()
                 case .you: YouView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 86) }
+            // Every tab screen reads the ACTUAL size of the floating chrome (including the temporary
+            // live-session banner) and reserves it on its own scroll views via `.clearsTabBar()`.
+            .environment(\.tabBarClearance, bottomChromeHeight + 12)
 
             VStack(spacing: 10) {
-                if model.store.liveEvent != nil && !model.showSession && model.tab != .today {
+                if model.store.liveEvent != nil && !model.showSession && model.tab != .home {
                     LiveSessionBar()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -43,7 +48,17 @@ struct MainShell: View {
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 6)
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: FloatingChromeHeightKey.self, value: geometry.size.height)
+                }
+            }
             .animation(Motion.bouncy, value: model.store.liveEvent?.id)
+        }
+        .onPreferenceChange(FloatingChromeHeightKey.self) { newHeight in
+            if newHeight > 0 && abs(bottomChromeHeight - newHeight) > 0.5 {
+                bottomChromeHeight = newHeight
+            }
         }
         .overlay(alignment: .top) {
             ToastStack().padding(.top, 6)
@@ -54,14 +69,24 @@ struct MainShell: View {
             }
         }
         .fullScreenCover(isPresented: $model.showSession) {
+            // The session is a fixed "sticker world" (identity colour → light paper): keep its
+            // ink-on-colour contrast in Dark Mode too.
             SessionView()
                 .environment(model)
+                .environment(\.colorScheme, .light)
         }
         .sheet(item: $model.sheet) { sheet in
             ActiveSheetView(sheet: sheet)
                 .environment(model)
         }
         .background(Palette.paper.ignoresSafeArea())
+    }
+}
+
+private struct FloatingChromeHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 72 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -89,6 +114,8 @@ struct ActiveSheetView: View {
             HighlightsView(period: period, reference: date)
         case .groupHighlights(let zone):
             HighlightsView(period: .week, reference: Date().addingTimeInterval(-7 * 24 * 3600), groupZone: zone)
+        case .profilePoster:
+            ProfilePosterSheetView()
         }
     }
 }
@@ -98,8 +125,7 @@ struct TabBar: View {
 
     private func color(_ tab: AppTab) -> Color {
         switch tab {
-        case .today: return Palette.sun
-        case .map: return Palette.aqua
+        case .home: return Palette.aqua
         case .groups: return Palette.pink
         case .calendar: return Palette.lime
         case .you: return Palette.violet
@@ -107,7 +133,7 @@ struct TabBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             ForEach(AppTab.allCases, id: \.self) { tab in
                 let selected = tab == selection
                 Button {
@@ -115,20 +141,28 @@ struct TabBar: View {
                     withAnimation(Motion.snappy) { selection = tab }
                 } label: {
                     VStack(spacing: 3) {
-                        Image(systemName: tab.symbol)
-                            .font(.system(size: selected ? 21 : 18, weight: .black))
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: tab.symbol)
+                                .font(.system(size: 19, weight: .black))
+                            if selected {
+                                Circle()
+                                    .fill(color(tab))
+                                    .frame(width: 7, height: 7)
+                                    .overlay(Circle().strokeBorder(Palette.paper, lineWidth: 1))
+                                    .offset(x: 7, y: -4)
+                            }
+                        }
                         Text(tab.title)
-                            .font(.heading(9))
+                            .font(.heading(9.5))
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                     }
-                    .foregroundStyle(selected ? (tab == .you || tab == .groups ? .white : Palette.inkFixed) : Palette.ink)
-                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .foregroundStyle(selected ? Palette.paper : Palette.muted)
+                    .frame(maxWidth: .infinity, minHeight: 52)
                     .background {
                         if selected {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(color(tab))
-                                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Palette.line, lineWidth: 2))
+                                .fill(Palette.ink)
                         }
                     }
                 }
@@ -137,8 +171,12 @@ struct TabBar: View {
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
-        .padding(6)
-        .sticker(Palette.card, radius: 22, shadow: 4)
+        .padding(5)
+        .background(
+            RoundedRectangle(cornerRadius: 21, style: .continuous)
+                .fill(Palette.card)
+                .overlay(RoundedRectangle(cornerRadius: 21, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        )
     }
 }
 
@@ -151,15 +189,15 @@ struct LiveSessionBar: View {
             Button {
                 model.showSession = true
             } label: {
-                HStack(spacing: 12) {
-                    Object3DImage(subject: .poop(model.store.profile.equippedCosmetic), size: 34)
-                    Text("CURRENTLY POOPING").font(.heading(13)).foregroundStyle(Palette.inkFixed)
+                HStack(spacing: 10) {
+                    Circle().fill(Palette.sun).frame(width: 10, height: 10)
+                    Text("CURRENTLY POOPING").font(.heading(12)).foregroundStyle(Palette.paper)
                     Spacer()
-                    TimerText(start: live.startedAt, size: 20, color: Palette.inkFixed)
+                    TimerText(start: live.startedAt, size: 18, color: Palette.paper)
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .sticker(Palette.sun, radius: 18, shadow: 4)
+                .padding(.vertical, 11)
+                .background(Capsule().fill(Palette.ink))
             }
             .buttonStyle(PressableStyle())
         }

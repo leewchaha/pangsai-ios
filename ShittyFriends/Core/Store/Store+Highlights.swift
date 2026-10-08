@@ -29,36 +29,92 @@ public extension Store {
         HighlightsEngine.cards(for: friendHighlightParticipants(), period: period, reference: reference ?? clock(), calendar: calendar, isGroup: false)
     }
 
+    /// Personal highlights: only my own poops (the YOU tab and the daily/weekly/monthly reports).
+    func myHighlightCards(period: HighlightPeriod, reference: Date? = nil) -> [HighlightCard] {
+        let me = HighlightParticipant(id: userID ?? UserID.localMe, handle: profile.handle, color: profile.color, events: my.events.values.map(HighlightEvent.init))
+        return HighlightsEngine.cards(for: [me], period: period, reference: reference ?? clock(), calendar: calendar, isGroup: false)
+    }
+
     func groupHighlightCards(_ zone: ZoneRef, period: HighlightPeriod, reference: Date? = nil) -> [HighlightCard] {
         HighlightsEngine.cards(for: groupHighlightParticipants(zone), period: period, reference: reference ?? clock(), calendar: calendar, isGroup: true)
     }
 
-    /// Map points I'm allowed to see: mine, friends' (full history), and group-shared locations.
+    /// Map-first Home only needs the newest located poop for each visible person.
+    /// This both matches the Zenly-style product model and avoids rebuilding thousands of history pins.
+    func latestMapPoints(includeMine: Bool = true, friendIDs: Set<UserID>? = nil, groupZones: Set<ZoneRef> = []) -> [MapPoint] {
+        let me = userID ?? UserID.localMe
+        var latest: [UserID: MapPoint] = [:]
+
+        func consider(id: UUID, ownerID: UserID, event: PoopEvent) {
+            guard let location = event.location else { return }
+            let point = MapPoint(
+                id: id.uuidString,
+                ownerID: ownerID,
+                latitude: location.latitude,
+                longitude: location.longitude,
+                label: location.label,
+                date: event.startedAt
+            )
+            if let old = latest[ownerID], old.date >= point.date { return }
+            latest[ownerID] = point
+        }
+
+        if includeMine {
+            for event in my.events.values { consider(id: event.id, ownerID: me, event: event) }
+        }
+
+        for link in activeFriendLinks {
+            guard let uid = link.userID, friendIDs?.contains(uid) ?? true, let friend = cache.friends[uid] else { continue }
+            for event in friend.events.values {
+                consider(id: event.id, ownerID: uid, event: event)
+            }
+        }
+
+        for zone in groupZones {
+            guard let zoneCache = cache.zones[zone] else { continue }
+            for event in zoneCache.events.values {
+                guard let location = event.location else { continue }
+                let point = MapPoint(
+                    id: event.id.uuidString,
+                    ownerID: event.ownerID,
+                    latitude: location.latitude,
+                    longitude: location.longitude,
+                    label: location.label,
+                    date: event.startedAt
+                )
+                if let old = latest[event.ownerID], old.date >= point.date { continue }
+                latest[event.ownerID] = point
+            }
+        }
+
+        return latest.values.sorted { $0.date > $1.date }
+    }
+
+    /// Every located poop I'm allowed to see (Home map history): mine, friends' (full history), and
+    /// group-shared locations. Each event appears once even if it reached me through several routes.
     func mapPoints(includeMine: Bool = true, friendIDs: Set<UserID>? = nil, groupZones: Set<ZoneRef> = []) -> [MapPoint] {
         var out: [MapPoint] = []
         let me = userID ?? UserID.localMe
         var seen = Set<UUID>()
+
+        func add<E: PoopLike>(_ e: E, id: UUID, owner: UserID) {
+            guard let l = e.location, !seen.contains(id) else { return }
+            seen.insert(id)
+            let live = e.source == .timed && e.endedAt == nil
+            var duration: TimeInterval?
+            if e.source != .instant, let end = e.endedAt { duration = max(0, end.timeIntervalSince(e.startedAt)) }
+            out.append(MapPoint(id: id.uuidString, ownerID: owner, latitude: l.latitude, longitude: l.longitude, label: l.label, date: e.startedAt, duration: duration, isLive: live))
+        }
+
         if includeMine {
-            for e in my.events.values {
-                guard let l = e.location else { continue }
-                seen.insert(e.id)
-                out.append(MapPoint(id: e.id.uuidString, ownerID: me, latitude: l.latitude, longitude: l.longitude, label: l.label, date: e.startedAt))
-            }
+            for e in my.events.values { add(e, id: e.id, owner: me) }
         }
         for s in friendSummaries() where friendIDs?.contains(s.person.id) ?? true {
-            for e in friendEvents(s.person.id) {
-                guard let l = e.location, !seen.contains(e.id) else { continue }
-                seen.insert(e.id)
-                out.append(MapPoint(id: e.id.uuidString, ownerID: s.person.id, latitude: l.latitude, longitude: l.longitude, label: l.label, date: e.startedAt))
-            }
+            for e in friendEvents(s.person.id) { add(e, id: e.id, owner: s.person.id) }
         }
         for zone in groupZones {
-            for e in cache.zones[zone]?.events.values.map({ $0 }) ?? [] {
-                guard let l = e.location, !seen.contains(e.id) else { continue }
-                seen.insert(e.id)
-                out.append(MapPoint(id: e.id.uuidString, ownerID: e.ownerID, latitude: l.latitude, longitude: l.longitude, label: l.label, date: e.startedAt))
-            }
+            for e in cache.zones[zone]?.events.values.map({ $0 }) ?? [] { add(e, id: e.id, owner: e.ownerID) }
         }
-        return out
+        return out.sorted { $0.date > $1.date }
     }
 }

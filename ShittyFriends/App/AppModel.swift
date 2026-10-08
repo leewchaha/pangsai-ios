@@ -8,12 +8,11 @@ import os
 private let log = Logger(subsystem: "com.sakara.shittyfriends", category: "app")
 
 enum AppTab: String, CaseIterable, Hashable {
-    case today, map, groups, calendar, you
+    case home, groups, calendar, you
 
     var title: String {
         switch self {
-        case .today: return "TODAY"
-        case .map: return "MAP"
+        case .home: return "HOME"
         case .groups: return "GROUPS"
         case .calendar: return "CALENDAR"
         case .you: return "YOU"
@@ -22,8 +21,7 @@ enum AppTab: String, CaseIterable, Hashable {
 
     var symbol: String {
         switch self {
-        case .today: return "sun.max.fill"
-        case .map: return "map.fill"
+        case .home: return "map.fill"
         case .groups: return "person.3.fill"
         case .calendar: return "calendar"
         case .you: return "face.smiling.inverse"
@@ -61,6 +59,7 @@ enum ActiveSheet: Identifiable, Equatable {
     case highlights(HighlightPeriod, Date)
     /// Last week's highlights for one group (from a group highlights notification).
     case groupHighlights(ZoneRef)
+    case profilePoster
 
     var id: String {
         switch self {
@@ -71,6 +70,7 @@ enum ActiveSheet: Identifiable, Equatable {
         case .party(let id): return "party-" + id.uuidString
         case .highlights(let p, let d): return "hl-\(p.rawValue)-\(d.timeIntervalSince1970)"
         case .groupHighlights(let z): return "ghl-" + z.description
+        case .profilePoster: return "profile-poster"
         }
     }
 }
@@ -85,9 +85,10 @@ final class AppModel {
     @ObservationIgnored let pings: PingService
     @ObservationIgnored let notifications: NotificationManager
     @ObservationIgnored let location: LocationService
+    @ObservationIgnored let liveActivity = PoopingLiveActivityCoordinator()
 
     var availability: CloudAvailability = .unknown
-    var tab: AppTab = .today
+    var tab: AppTab = .home
     var toasts: [Toast] = []
     var sheet: ActiveSheet?
     var groupOffers: [UUID: GroupJoinOffer] = [:]
@@ -109,11 +110,25 @@ final class AppModel {
     @ObservationIgnored private var pollRefs: [String: Int] = [:]
     @ObservationIgnored private var pollIntervals: [String: Double] = [:]
     @ObservationIgnored private var startTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var didFinishInitialStart = false
+    /// "is pooping" alerts wait out the Undo window, so a mis-tap never reaches anyone.
+    @ObservationIgnored private var pendingPoopPings: [UUID: PingIntent] = [:]
+    @ObservationIgnored private var lastPoopPingAt: Date?
+    /// At most one poop alert per this many seconds: a burst of logs doesn't spam every friend.
+    static let poopPingCooldown: TimeInterval = 120
 
     init() {
         let dir = CloudConfig.localDirectory
-        persistence = FilePersistence(directory: dir)
-        store = Store(my: persistence.loadMy(), cache: persistence.loadCache())
+        let filePersistence = FilePersistence(directory: dir)
+        persistence = filePersistence
+        var localMy = filePersistence.loadMy()
+        // Location-backed poop pins are a core Home experience now. Existing users who have never
+        // made a location choice inherit the new default; an explicit previous choice is preserved.
+        if !localMy.settings.locationPrompted {
+            localMy.settings.attachLocationByDefault = true
+        }
+        store = Store(my: localMy, cache: filePersistence.loadCache())
         cloud = CloudSync(store: store, directory: dir)
         shares = ShareService(cloud: cloud, store: store)
         pings = PingService(store: store, directory: dir)
@@ -121,6 +136,10 @@ final class AppModel {
         location = LocationService()
 
         store.onDirty = { [weak self] _ in self?.scheduleSave() }
+        store.onSessionChange = { [weak self] event in
+            guard let self else { return }
+            self.liveActivity.sync(event: event, cosmetic: self.store.profile.equippedCosmetic, privateMode: self.store.settings.lockScreenPrivate)
+        }
         store.effectHandler = { [weak self] effect in self?.handle(effect) }
         cloud.onAvailabilityChange = { [weak self] a in self?.availability = a }
         cloud.onRemoteChangesApplied = { [weak self] in self?.pings.writeDirectory() }
@@ -131,6 +150,7 @@ final class AppModel {
 
     /// Idempotent; concurrent callers wait for the same start.
     func start() async {
+        liveActivity.sync(event: store.liveEvent, cosmetic: store.profile.equippedCosmetic, privateMode: store.settings.lockScreenPrivate)
         if let startTask {
             await startTask.value
             return
@@ -138,6 +158,7 @@ final class AppModel {
         let task = Task { await self.performStart() }
         startTask = task
         await task.value
+        didFinishInitialStart = true
     }
 
     private func performStart() async {
@@ -149,24 +170,47 @@ final class AppModel {
         afterCloudStart()
     }
 
-    private func afterCloudStart() {
+    private func afterCloudStart(scheduleInitialRefresh: Bool = true) {
         guard availability.isAvailable else { return }
         pings.writeDirectory()
+        // Cached state paints Home immediately.  Stagger network/subscription work so MapKit gets
+        // a clean first second instead of receiving several MainActor-heavy CloudKit callbacks at once.
         Task {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
             await pings.refreshSubscriptions(force: false)
-            await refresh()
         }
+        if scheduleInitialRefresh { scheduleRefresh(afterNanoseconds: 1_250_000_000) }
         notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
         for p in store.parties() where store.myRSVP(p)?.response != .no { notifications.scheduleParty(p, settings: store.settings) }
+
+        #if DEBUG
+        // CKShare's system record type is only born after a real share is saved in Development.
+        // Doing this automatically in debug makes the one-time Production schema deployment much harder to miss.
+        Task { await shares.bootstrapDevelopmentSharingSchema() }
+        #endif
+    }
+
+    /// Coalesces launch/foreground refreshes. SwiftUI can report `.active` while initial startup is still
+    /// in flight; without this gate the app could start two full CloudKit fetches during cold launch.
+    private func scheduleRefresh(afterNanoseconds delay: UInt64 = 0) {
+        guard refreshTask == nil else { return }
+        refreshTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+            guard let self else { return }
+            defer { self.refreshTask = nil }
+            guard !Task.isCancelled else { return }
+            await self.refresh()
+        }
     }
 
     /// Foreground / pull-to-refresh: fetch everything, process pings, clean up.
     func refresh() async {
-        guard availability.isAvailable else {
-            // Not signed in earlier (or iCloud was busy): try again; afterCloudStart re-enters refresh when ready.
+        if !availability.isAvailable {
+            // Not signed in earlier (or iCloud was busy): try again, then continue this same refresh.
             await cloud.start()
-            afterCloudStart()
-            return
+            afterCloudStart(scheduleInitialRefresh: false)
+            guard availability.isAvailable else { return }
         }
         pings.cleanupExpired()
         cleanupSpaces()
@@ -189,11 +233,15 @@ final class AppModel {
 
     func enteredForeground() {
         isForeground = true
-        Task { await refresh() }
+        liveActivity.sync(event: store.liveEvent, cosmetic: store.profile.equippedCosmetic, privateMode: store.settings.lockScreenPrivate)
+        guard didFinishInitialStart else { return }
+        scheduleRefresh()
     }
 
     func enteredBackground() {
         isForeground = false
+        // iOS may suspend us before the Undo window ends; send what's still valid now.
+        flushAllPoopPings()
         saveNow()
         Task { await cloud.sendAll() }
     }
@@ -241,7 +289,11 @@ final class AppModel {
             if case .invite(let token) = ref { Task { await shares.deleteInviteCard(token: token) } }
             scheduleSend()
         case .ping(let intent):
-            pings.send(intent)
+            if case .poop(let eventID, _) = intent {
+                queuePoopPing(intent, eventID: eventID)
+            } else {
+                pings.send(intent)
+            }
         case .cancelPings(let eventID):
             pings.cancel(eventID: eventID)
         case .scheduleLongSessionReminder(let id, let at):
@@ -253,9 +305,32 @@ final class AppModel {
         case .cancelParty(let id):
             notifications.cancelParty(id)
         case .requestLocation(let eventID):
-            location.locateOnce { [weak self] loc in
-                guard let self, let loc else { return }
-                self.store.attachLocation(loc, to: eventID)
+            // Location is on by default for poop logs, but still requires the user's one-time iOS
+            // permission. Ask contextually on the first located poop rather than during cold launch.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let allowed: Bool
+                if self.location.isAuthorized {
+                    allowed = true
+                    if !self.store.settings.locationPrompted {
+                        self.store.updateSettings { $0.locationPrompted = true }
+                    }
+                } else if self.location.isDenied {
+                    // Every poop is pinned; there is no in-app "off". Without iOS permission the poop
+                    // simply has no pin (Settings shows how to turn location back on).
+                    allowed = false
+                    if !self.store.settings.locationPrompted {
+                        self.store.updateSettings { $0.locationPrompted = true }
+                    }
+                } else {
+                    allowed = await self.location.requestAuthorization()
+                    self.store.updateSettings { $0.locationPrompted = true }
+                }
+                guard allowed else { return }
+                self.location.locateOnce { [weak self] loc in
+                    guard let self, let loc else { return }
+                    self.store.attachLocation(loc, to: eventID)
+                }
             }
         case .refreshSubscriptions:
             pings.scheduleSubscriptionRefresh()
@@ -279,6 +354,32 @@ final class AppModel {
         case .haptic(let kind):
             Haptics.play(kind)
         }
+    }
+
+    // MARK: - Poop alerts
+
+    private func queuePoopPing(_ intent: PingIntent, eventID: UUID) {
+        pendingPoopPings[eventID] = intent
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((Store.undoWindow + 0.5) * 1_000_000_000))
+            self?.flushPoopPing(eventID)
+        }
+    }
+
+    private func flushPoopPing(_ eventID: UUID) {
+        guard let intent = pendingPoopPings.removeValue(forKey: eventID) else { return }
+        // Undone or deleted inside the window: nobody hears about it.
+        guard let event = store.my.events[eventID] else { return }
+        // A timer already stopped inside the window must not announce "is pooping".
+        if case .poop(_, let kind) = intent, kind == .poopStart, !event.isLive { return }
+        let now = Date()
+        if let last = lastPoopPingAt, now.timeIntervalSince(last) < AppModel.poopPingCooldown { return }
+        lastPoopPingAt = now
+        pings.send(intent)
+    }
+
+    private func flushAllPoopPings() {
+        for id in Array(pendingPoopPings.keys) { flushPoopPing(id) }
     }
 
     // MARK: - Presentation
@@ -317,8 +418,33 @@ final class AppModel {
     func info(_ title: String, _ body: String = "") { show(Toast(style: .info, title: title, body: body)) }
 
     func error(_ title: String, _ error: Error) {
-        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        show(Toast(style: .error, title: title, body: message))
+        show(Toast(style: .error, title: title, body: userFacingErrorMessage(error)))
+    }
+
+    /// Never expose CKRecord IDs, zone names, server schema strings, or other CloudKit internals in UI.
+    func userFacingErrorMessage(_ error: Error) -> String {
+        if let shareError = error as? ShareService.ShareError {
+            return shareError.errorDescription ?? "iCloud couldn't finish that. Try again."
+        }
+        if let socialError = error as? SocialError {
+            return socialError.errorDescription ?? "That didn't work. Try again."
+        }
+        if let ckError = error as? CKError {
+            switch ckError.code {
+            case .notAuthenticated:
+                return "Sign in to iCloud and try again."
+            case .networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited, .zoneBusy:
+                return "iCloud is temporarily unavailable. Try again in a moment."
+            default:
+                log.error("CloudKit operation failed: \(ckError.localizedDescription, privacy: .public)")
+                return "iCloud couldn't finish that. Try again later."
+            }
+        }
+        if let localized = error as? LocalizedError, let message = localized.errorDescription, !message.isEmpty {
+            return message
+        }
+        log.error("operation failed: \(error.localizedDescription, privacy: .public)")
+        return "Something went wrong. Try again."
     }
 
     // MARK: - Live polling (only while a social screen is visible)
@@ -348,7 +474,7 @@ final class AppModel {
         pollIntervals[key] = nil
     }
 
-    /// Friends' presence while TODAY is visible.
+    /// Friends' presence while HOME is visible.
     func startPresencePolling() {
         guard pollTasks["presence"] == nil else { return }
         pollTasks["presence"] = Task { [weak self] in

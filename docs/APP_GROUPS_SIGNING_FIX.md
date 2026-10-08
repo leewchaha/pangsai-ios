@@ -53,9 +53,33 @@ The project ZIP cannot alter App IDs or profiles held in your Apple Developer ac
 - Invoke `xcode-project use-profiles --project "$XCODE_PROJECT" --archive-method app-store`
   so Codemagic doesn't select an ad hoc/development signing profile by accident.
 - Run `verify_signing_profiles.py --check-assignments` **after** applying them. It
-  reads Release target signing settings and ensures **both targets** are assigned
+  queries each target's Release/iphoneos signing settings and ensures **both targets** are assigned
   valid App Store profiles that include the shared App Group.
 - Neither signing secrets nor provisioning profiles are included in the ZIP.
+
+
+## 2026-10-07 follow-up: CloudKit false positive fixed
+
+The first version of the preflight assumed `com.apple.developer.icloud-services`
+would always be an array containing the literal value `CloudKit`. Apple can also
+encode a provisioning profile's entitlement allowlist as the wildcard `*`. In
+that case the profile *does* allow CloudKit, but the old script reported:
+
+```
+CloudKit capability not provisioned
+```
+
+The preflight now accepts both the explicit `CloudKit` value and Apple's `*`
+allowlist form. It still requires the configured iCloud container, production
+push entitlement, App Group, App Store distribution type, correct bundle ID,
+and correct team.
+
+The separate `NotificationService: No installed App Store provisioning profile`
+message is **not** a false positive. A registered extension Bundle ID is not a
+provisioning profile. Codemagic must have a distinct App Store profile stored for
+`com.sakara.shittyfriends.NotificationService`; once it is present, the existing
+`ios_signing.bundle_identifier: com.sakara.shittyfriends` rule will also fetch
+matching `com.sakara.shittyfriends.*` extension profiles.
 
 ## Interpreting the new build results
 
@@ -80,3 +104,24 @@ must still be run on Codemagic/Xcode to confirm end-to-end signing.
 
 - Apple: https://developer.apple.com/help/account/identifiers/enable-app-capabilities/
 - Codemagic: https://docs.codemagic.io/yaml-code-signing/signing-ios/
+
+## 2026-10-07 follow-up: false `No Release build settings` fixed
+
+After the extension App Store profile was added, the preflight reported both
+profiles as valid but then failed with:
+
+```
+ERROR: NotificationService: No Release build settings found after use-profiles.
+```
+
+That message was a verifier bug, not evidence that the extension profile had
+vanished. The verifier asked Xcode for `-scheme ShittyFriends -showBuildSettings`.
+An embedded app-extension dependency can be built for archive without appearing
+as a separate row in that scheme-level build-settings JSON.
+
+The assignment check now queries the **ShittyFriends** and **NotificationService**
+targets individually with `-configuration Release -sdk iphoneos`. This inspects
+the actual device/App Store signing settings after `xcode-project use-profiles`.
+If the extension really has no assigned profile, the verifier will now report
+`No profile assigned to the Release build` instead of falsely claiming that the
+target has no Release settings.

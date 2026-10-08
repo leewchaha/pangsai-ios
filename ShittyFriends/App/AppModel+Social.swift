@@ -34,16 +34,13 @@ extension AppModel {
 
     // MARK: - Friend invites (A side)
 
-    /// The https link + QR payload for my current invite. Creates the invite card on first use.
+    /// QR/share payload for my current invite. The invite itself is app data, not a CKShare.
+    /// This avoids creating `cloudkit.share` just to show the Add Friends screen; CloudKit sharing is
+    /// only needed later, after both people explicitly accept and history access is granted.
     func friendInviteURL() async throws -> URL {
         try requireCloud()
-        let invite = store.currentInvite()
-        if let s = invite.shareURL, let url = URL(string: s) { return url }
         let payload = store.friendInvitePayload()
-        let url = try await shares.inviteCardURL(token: invite.token, payload: payload)
-        store.setInviteShareURL(invite.token, url)
-        guard let u = URL(string: url) else { throw SocialError.badLink }
-        return u
+        return DeepLinkCodec.friendURL(payload)
     }
 
     func friendInviteText(_ url: URL) -> String {
@@ -372,7 +369,7 @@ extension AppModel {
     /// Starts Poop With Me inside a group (members are reached through the group).
     func startPWM(group: GroupSummary, invitees: [PersonRef]) -> UUID? {
         guard store.liveEvent != nil else {
-            info("START POOPING FIRST", "Poop With Me starts from a live session.")
+            info("TAP POOP NOW FIRST", "Poop With Me starts from a running timer.")
             return nil
         }
         return store.createPWMSession(zone: group.link.zone, groupID: group.link.id, invitees: invitees)

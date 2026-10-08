@@ -168,6 +168,7 @@ final class SocialTests: XCTestCase {
         store.registerJoinedGroup(zone: zone, groupID: gid, name: "Class", shareURL: nil)
         XCTAssertTrue(log.saves.filter { if case .groupEvent = $0 { return true } else { return false } }.isEmpty,
                       "group membership is not personal-history access: nothing before joining is mirrored")
+        XCTAssertEqual(store.my.groupLinks[gid]?.notify, .pwmAndParties, "joining by link starts quiet: no alert per member poop")
         clock.advance(60)
         store.logInstant()
         clock.advance(60)

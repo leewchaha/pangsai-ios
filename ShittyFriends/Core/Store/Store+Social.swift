@@ -168,7 +168,9 @@ public extension Store {
         guard let uid = my.userID else { return nil }
         if let existing = my.groupLinks[groupID] { return existing }
         let now = clock()
-        let link = GroupLink(id: groupID, zone: zone, isOwner: false, shareURL: shareURL, nameCache: name, joinedAt: now, updatedAt: now)
+        // Anyone with the link can join, so a new member starts quiet: Poop With Me + parties only.
+        // "All activity" (an alert per member poop) is one tap away in the group's settings.
+        let link = GroupLink(id: groupID, zone: zone, isOwner: false, shareURL: shareURL, notify: .pwmAndParties, nameCache: name, joinedAt: now, updatedAt: now)
         let member = GroupMember(person: meRef, inbox: link.myInbox, role: .member, joinedAt: now, updatedAt: now)
         mutateMy { $0.groupLinks[groupID] = link }
         mutateCache { c in

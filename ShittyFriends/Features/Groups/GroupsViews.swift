@@ -13,20 +13,31 @@ struct GroupsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("GROUPS")
-                        .font(.display(40))
+                        .font(.display(31))
                         .foregroundStyle(Palette.ink)
                     Text("Group members see what you share in the group. Full history stays between friends.")
                         .font(.ui(14, .medium))
                         .foregroundStyle(Palette.muted)
 
-                    HStack(spacing: 12) {
-                        Button { creating = true } label: { Label("NEW GROUP", systemImage: "plus") }
-                            .buttonStyle(.sticker(Palette.pink, ink: .white))
+                    HStack(spacing: 8) {
+                        Button { creating = true } label: {
+                            Label("NEW GROUP", systemImage: "plus")
+                                .font(.heading(11))
+                                .foregroundStyle(Palette.paper)
+                                .frame(maxWidth: .infinity, minHeight: 46)
+                                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Palette.ink))
+                        }
                         Button {
                             if let text = UIPasteboard.general.string { model.handle(text: text) } else { model.info("CLIPBOARD EMPTY", "Copy the group invite link first.") }
-                        } label: { Label("JOIN", systemImage: "link") }
-                            .buttonStyle(.sticker(Palette.card, ink: Palette.ink))
+                        } label: {
+                            Label("PASTE INVITE", systemImage: "doc.on.clipboard")
+                                .font(.heading(11))
+                                .foregroundStyle(Palette.ink)
+                                .frame(maxWidth: .infinity, minHeight: 46)
+                                .calmSurface(Palette.card, radius: 16)
+                        }
                     }
+                    .buttonStyle(PressableStyle())
 
                     let parties = store.parties()
                     if !parties.isEmpty {
@@ -52,6 +63,7 @@ struct GroupsView: View {
                 .padding(.vertical, 12)
             }
             .scrollIndicators(.hidden)
+            .clearsTabBar()
             .background(Palette.paper.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .refreshable { await model.refresh() }
@@ -69,25 +81,31 @@ struct GroupCard: View {
         let board = model.store.leaderboard(group.link.zone)
         let total = board.reduce(0) { $0 + $1.count }
         let live = group.members.filter { m in model.store.cache.zones[group.link.zone]?.events.values.contains { $0.ownerID == m.id && $0.isLive } ?? false }
-        HStack(spacing: 14) {
-            Object3DImage(subject: .group(group.object), size: 64)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(group.name.uppercased()).font(.heading(18)).foregroundStyle(group.color.ink).lineLimit(1)
-                Text("\(group.members.count) members · \(total) this week").font(.ui(13, .semibold)).foregroundStyle(group.color.ink.opacity(0.8))
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(group.color.color.opacity(0.28)).frame(width: 56, height: 56)
+                Object3DImage(subject: .group(group.object), size: 48)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(group.name.uppercased()).font(.heading(15)).foregroundStyle(Palette.ink).lineLimit(1)
+                Text("\(group.members.count) members · \(total) this week").font(.ui(12, .semibold)).foregroundStyle(Palette.muted)
                 if !live.isEmpty {
-                    Text("💩 " + live.map { group.labels[$0.id] ?? "@" + $0.person.handle }.joined(separator: ", ") + " pooping now")
-                        .font(.ui(12, .bold))
-                        .foregroundStyle(group.color.ink)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Circle().fill(group.color.color).frame(width: 7, height: 7)
+                        Text(live.map { group.labels[$0.id] ?? "@" + $0.person.handle }.joined(separator: ", ") + " pooping now")
+                            .font(.ui(11, .bold))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                    }
                 }
             }
             Spacer()
-            HStack(spacing: -12) {
-                ForEach(group.members.prefix(3)) { m in AvatarView(person: m.person, size: 34) }
+            HStack(spacing: -10) {
+                ForEach(group.members.prefix(3)) { m in AvatarView(person: m.person, size: 30) }
             }
         }
-        .padding(14)
-        .sticker(group.color.color, radius: 22, shadow: 5)
+        .padding(12)
+        .calmSurface(Palette.card, radius: 20)
     }
 }
 
@@ -142,6 +160,7 @@ struct CreateGroupView: View {
                 .gutter()
                 .padding(.bottom, 24)
             }
+            .scrollDismissesKeyboard(.immediately)
             .background(Palette.paper.ignoresSafeArea())
             .navigationTitle("NEW GROUP")
             .navigationBarTitleDisplayMode(.inline)
@@ -217,6 +236,7 @@ struct GroupDetailView: View {
     @State private var newParty = false
     @State private var pwmPicker = false
     @State private var confirmLeave = false
+    @State private var showHighlights = false
 
     private var store: Store { model.store }
 
@@ -259,11 +279,8 @@ struct GroupDetailView: View {
                     } label: { Label("INVITE", systemImage: "qrcode") }
                         .buttonStyle(.sticker(Palette.sun))
                     Button {
-                        if store.liveEvent == nil {
-                            model.info("START POOPING FIRST", "Poop With Me starts from a live session.")
-                        } else {
-                            pwmPicker = true
-                        }
+                        // Picking people first; the timer starts on INVITE (if it isn't running yet).
+                        pwmPicker = true
                     } label: { Label("POOP WITH", systemImage: "person.3.fill") }
                         .buttonStyle(.sticker(Palette.pink, ink: .white))
                 }
@@ -294,10 +311,16 @@ struct GroupDetailView: View {
                 .sticker(Palette.card)
 
                 if !cards.isEmpty {
-                    SectionTitle(period.title)
+                    // The group's own highlights (only what members shared here), as stories.
+                    SectionTitle(period.title, trailing: "▶ PLAY") { showHighlights = true }
                     ScrollView(.horizontal) {
                         HStack(spacing: 14) {
-                            ForEach(cards) { c in HighlightCardView(card: c, compact: true).frame(width: 210) }
+                            ForEach(cards) { c in
+                                Button { showHighlights = true } label: {
+                                    HighlightCardView(card: c, compact: true).frame(width: 210)
+                                }
+                                .buttonStyle(PressableStyle())
+                            }
                         }
                         .padding(.vertical, 8)
                         .padding(.horizontal, 2)
@@ -400,6 +423,7 @@ struct GroupDetailView: View {
             .padding(.vertical, 12)
         }
         .scrollIndicators(.hidden)
+        .clearsTabBar()
         .background(Palette.paper.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await model.cloud.fetch(zone: g.link.zone) }
@@ -409,6 +433,9 @@ struct GroupDetailView: View {
             if let url = inviteURL { GroupInviteSheet(name: g.name, url: url).environment(model) }
         }
         .sheet(isPresented: $newParty) { CreatePartyView(group: g).environment(model) }
+        .sheet(isPresented: $showHighlights) {
+            HighlightsView(period: period, reference: Date(), groupZone: g.link.zone).environment(model)
+        }
         .sheet(isPresented: $pwmPicker) {
             GroupPWMSheet(group: g).environment(model)
         }
@@ -499,19 +526,32 @@ struct GroupPWMSheet: View {
             .scrollContentBackground(.hidden)
             .background(Palette.paper.ignoresSafeArea())
             .safeAreaInset(edge: .bottom) {
-                Button("INVITE \(selected.count)") {
-                    let people = others.filter { selected.contains($0.id) }.map(\.person)
-                    if let live = model.store.liveEvent, let sid = live.pwmSessionID, let view = model.store.liveSession(sid), view.zone == group.link.zone {
-                        Task { await model.inviteMore(view, people: people); dismiss() }
-                    } else if model.startPWM(group: group, invitees: people) != nil {
-                        dismiss()
-                        model.presentSession(afterDismissal: true)
+                VStack(spacing: 6) {
+                    if model.store.liveEvent == nil {
+                        Text("Inviting starts your timer — it counts as a poop (+1).")
+                            .font(.ui(12, .medium))
+                            .foregroundStyle(Palette.muted)
+                            .multilineTextAlignment(.center)
                     }
+                    Button(model.store.liveEvent == nil ? "START + INVITE \(selected.count)" : "INVITE \(selected.count)") {
+                        let people = others.filter { selected.contains($0.id) }.map(\.person)
+                        if let live = model.store.liveEvent, let sid = live.pwmSessionID, let view = model.store.liveSession(sid), view.zone == group.link.zone {
+                            Task { await model.inviteMore(view, people: people); dismiss() }
+                            return
+                        }
+                        // Poop With Me lives inside a timed session: start one if needed.
+                        if model.store.liveEvent == nil { model.store.startTimed() }
+                        if model.startPWM(group: group, invitees: people) != nil {
+                            dismiss()
+                            model.presentSession(afterDismissal: true)
+                        }
+                    }
+                    .buttonStyle(.sticker(Palette.pink, ink: .white, height: 60))
+                    .disabled(selected.isEmpty)
                 }
-                .buttonStyle(.sticker(Palette.pink, ink: .white, height: 60))
-                .disabled(selected.isEmpty)
                 .gutter()
                 .padding(.vertical, 10)
+                .background(Palette.paper)
             }
             .navigationTitle("POOP WITH \(group.name.uppercased())")
             .navigationBarTitleDisplayMode(.inline)

@@ -47,6 +47,25 @@ targets:
       - target: NotificationService
         embed: true
         codeSign: true
+      - target: PoopingLiveActivity
+        embed: true
+        codeSign: true
+
+  PoopingLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PoopingLiveActivity
+      - path: ShittyFriends/Core/Shared/PoopingActivityAttributes.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sakara.shittyfriends.PoopingLiveActivity
+        PRODUCT_NAME: PoopingLiveActivity
+        CODE_SIGN_ENTITLEMENTS: PoopingLiveActivity/PoopingLiveActivity.entitlements
+        INFOPLIST_FILE: PoopingLiveActivity/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        SKIP_INSTALL: "YES"
+        APPLICATION_EXTENSION_API_ONLY: "YES"
 
   NotificationService:
     type: app-extension

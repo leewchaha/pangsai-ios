@@ -5,9 +5,12 @@ struct PartyRow: View {
 
     var body: some View {
         let yes = view.rsvps.filter { $0.response == .yes }.count
+        let weekday: String = view.party.scheduledAt.formatted(.dateTime.weekday(.abbreviated))
+        let group: String = view.groupName.map { " · " + $0 } ?? ""
+        let detail: String = "\(weekday) \(view.party.scheduledAt.shortTime)\(group) · \(yes) going"
         HStack(spacing: 12) {
             VStack(spacing: 0) {
-                Text(view.party.scheduledAt.formatted(.dateTime.weekday(.abbreviated)).uppercased()).font(.heading(10))
+                Text(view.party.scheduledAt.formatted(.dateTime.month(.abbreviated)).uppercased()).font(.heading(10))
                 Text(view.party.scheduledAt.formatted(.dateTime.day())).font(.digits(24))
             }
             .foregroundStyle(Palette.inkFixed)
@@ -15,7 +18,7 @@ struct PartyRow: View {
             .sticker(Palette.tangerine, radius: 14, shadow: 3, stroke: 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(view.party.title.uppercased()).font(.heading(15)).lineLimit(1)
-                Text(view.party.scheduledAt.shortTime + (view.groupName.map { " · " + $0 } ?? "") + " · \(yes) going")
+                Text(detail)
                     .font(.ui(12, .semibold))
                     .foregroundStyle(Palette.muted)
                     .lineLimit(1)
@@ -55,7 +58,7 @@ struct PartyDetailView: View {
                 VStack(spacing: 6) {
                     Text("🚨").font(.system(size: 54))
                     Text(p.party.title.uppercased()).font(.display(28)).multilineTextAlignment(.center)
-                    Text(p.party.scheduledAt.formatted(.dateTime.weekday(.wide).hour().minute()).uppercased())
+                    Text(p.party.scheduledAt.formatted(.dateTime.weekday(.wide).month(.abbreviated).day().hour().minute()).uppercased())
                         .font(.heading(16))
                     if let g = p.groupName { Text(g.uppercased()).font(.heading(12)).foregroundStyle(Palette.inkFixed.opacity(0.7)) }
                     if p.party.status == .cancelled {
@@ -133,6 +136,7 @@ struct PartyDetailView: View {
             .padding(.vertical, 14)
         }
         .scrollIndicators(.hidden)
+        .clearsTabBar()
         .background(Palette.paper.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { model.startPolling(p.zone, every: 10) }

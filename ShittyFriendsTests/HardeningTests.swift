@@ -56,21 +56,16 @@ final class HardeningTests: XCTestCase {
         XCTAssertEqual(parsed.first?.halfPoints, 0)
     }
 
-    func testEditingStartDateDoesNotDodgeDailyCap() {
+    func testMultipleSessionsKeepEarningWithoutDailyCap() {
         let clock = TestClock()
         let (store, _) = TestEnv.store(clock: clock)
-        // Fill today's cap.
         for _ in 0..<3 {
             store.startTimed()
             for _ in 0..<70 { clock.advance(0.3); store.tapPoop() }
-            let id = store.liveEvent!.id
             store.finish()
-            // Move the finished session to last week: it still counts against today's cap.
-            store.edit(id, start: clock.now.addingTimeInterval(-7 * 86400))
             clock.advance(60)
         }
-        let earnedToday = store.my.events.values.reduce(0) { $0 + $1.halfPoints }
-        XCTAssertLessThanOrEqual(earnedToday, PointRules.standard.dailyCap)
+        XCTAssertEqual(store.pointsBalance, 210, "every tap of every session pays; no session or daily cap")
     }
 
     // MARK: - Group write authority

@@ -15,6 +15,32 @@ final class LoggingTests: XCTestCase {
         XCTAssertTrue(log.contains(.scheduleLongSessionReminder(eventID: e.id, at: clock.now.addingTimeInterval(1800))))
     }
 
+    func testLiveActivityLifecycleSignalsOnlyOnTimedTransitions() {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        var transitions: [UUID?] = []
+        store.onSessionChange = { transitions.append($0?.id) }
+        _ = store.logInstant() // Should NOT open a Live Activity.
+        XCTAssertTrue(transitions.isEmpty)
+        let active = store.startTimed()
+        _ = store.startTimed() // Already active; no duplicate signal.
+        _ = store.tapPoop() // Taps never cause ActivityKit refresh loops.
+        XCTAssertEqual(transitions, [active.id])
+        store.finish()
+        XCTAssertEqual(transitions, [active.id, nil])
+    }
+
+    func testUndoLiveSessionSignalsEnd() {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        var transitions: [UUID?] = []
+        store.onSessionChange = { transitions.append($0?.id) }
+        let active = store.startTimed()
+        clock.advance(2)
+        store.performUndo()
+        XCTAssertEqual(transitions, [active.id, nil])
+    }
+
     func testSecondSingleTapDoesNotDoubleCount() {
         let clock = TestClock()
         let (store, _) = TestEnv.store(clock: clock)
@@ -110,6 +136,10 @@ final class LoggingTests: XCTestCase {
         XCTAssertFalse(store.my.events[e.id]!.manuallyAdjusted)
         store.edit(e.id, location: .some(nil))
         XCTAssertNil(store.my.events[e.id]?.location)
+    }
+
+    func testPoopLocationDefaultsOnForNewState() {
+        XCTAssertTrue(AppSettings().attachLocationByDefault)
     }
 
     func testRequestsLocationWhenDefaultOn() {

@@ -20,7 +20,11 @@ struct FriendsView: View {
                 } label: {
                     Label("ADD SHITTY FRIENDS", systemImage: "plus")
                 }
-                .buttonStyle(.sticker(Palette.aqua))
+                .font(.heading(12))
+                .foregroundStyle(Palette.paper)
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .background(RoundedRectangle(cornerRadius: 17, style: .continuous).fill(Palette.ink))
+                .buttonStyle(PressableStyle())
 
                 if !store.friendRequests.isEmpty {
                     SectionTitle("REQUESTS")
@@ -29,14 +33,21 @@ struct FriendsView: View {
                             HStack(spacing: 12) {
                                 AvatarView(person: req.person, size: 50)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    HandleText(handle: req.person.handle, size: 17, color: Palette.inkFixed)
-                                    Text("wants to be shitty friends").font(.ui(13, .medium)).foregroundStyle(Palette.inkFixed.opacity(0.7))
+                                    HandleText(handle: req.person.handle, size: 17, color: Palette.ink)
+                                    Text("wants to be shitty friends").font(.ui(13, .medium)).foregroundStyle(Palette.muted)
                                 }
                                 Spacer()
-                                Text("REVIEW").font(.heading(12)).foregroundStyle(Palette.inkFixed)
+                                Text("REVIEW").font(.heading(12)).foregroundStyle(Palette.ink)
                             }
                             .padding(12)
-                            .sticker(Palette.sun, radius: 18, shadow: 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .fill(Palette.card)
+                                    .overlay(alignment: .leading) {
+                                        RoundedRectangle(cornerRadius: 2).fill(Palette.sun).frame(width: 5).padding(.vertical, 8)
+                                    }
+                                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+                            )
                         }
                         .buttonStyle(PressableStyle())
                     }
@@ -59,7 +70,7 @@ struct FriendsView: View {
                                 .foregroundStyle(Palette.ink)
                         }
                         .padding(12)
-                        .sticker(Palette.card, radius: 16, shadow: 3, stroke: 2)
+                        .calmSurface(Palette.card, radius: 16)
                     }
                 }
 
@@ -75,7 +86,7 @@ struct FriendsView: View {
                     }
                     .foregroundStyle(Palette.ink)
                     .padding(14)
-                    .sticker(Palette.card)
+                    .calmSurface(Palette.card, radius: 20)
                 }
 
                 SectionTitle("FRIENDS · \(friends.count)")
@@ -95,6 +106,7 @@ struct FriendsView: View {
             .gutter()
             .padding(.vertical, 12)
         }
+        .clearsTabBar()
         .background(Palette.paper.ignoresSafeArea())
         .navigationTitle("SHITTY FRIENDS")
         .navigationBarTitleDisplayMode(.inline)
@@ -135,7 +147,7 @@ struct FriendRow: View {
             }
         }
         .padding(12)
-        .sticker(Palette.card, radius: 18, shadow: 4)
+        .calmSurface(Palette.card, radius: 18)
     }
 }
 
@@ -156,7 +168,7 @@ struct AddFriendsView: View {
                         .font(.display(30))
                         .multilineTextAlignment(.center)
                         .foregroundStyle(Palette.ink)
-                    Text("No usernames, no search. Share your link or QR. They tap it, you accept, histories unlock both ways.")
+                    Text("No usernames, no search. Share your invite or QR. They open it, you accept, histories unlock both ways.")
                         .font(.ui(14, .medium))
                         .foregroundStyle(Palette.muted)
                         .multilineTextAlignment(.center)
@@ -242,7 +254,7 @@ struct AddFriendsView: View {
             url = try await model.friendInviteURL()
             error = nil
         } catch {
-            self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            self.error = model.userFacingErrorMessage(error)
         }
     }
 }
@@ -414,10 +426,16 @@ struct FriendDetailView: View {
                     Group {
                         VStack(alignment: .leading, spacing: 10) {
                             SectionTitle("NOTIFY ME")
+                            // A menu, not a segmented control: "Poop With Me only" doesn't fit a segment.
                             Picker("Notify", selection: Binding(get: { link.notify }, set: { store.setFriendNotify(link.id, $0) })) {
                                 ForEach(FriendNotifyLevel.allCases, id: \.self) { Text($0.title).tag($0) }
                             }
-                            .pickerStyle(.segmented)
+                            .pickerStyle(.menu)
+                            .tint(Palette.ink)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 6)
+                            .frame(minHeight: 46)
+                            .calmSurface(Palette.card, radius: 16)
                         }
 
                         Button("REMOVE FRIEND", role: .destructive) { confirmRemove = true }
@@ -442,6 +460,7 @@ struct FriendDetailView: View {
                 EmptyState(emoji: "👻", title: "NOT FRIENDS", message: "This friendship ended or is still syncing.")
             }
         }
+        .clearsTabBar()
         .background(Palette.paper.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -453,12 +472,16 @@ struct StatTile: View {
     var fill: Color = Palette.card
 
     var body: some View {
-        VStack(spacing: 2) {
-            Text(value).font(.digits(26)).lineLimit(1).minimumScaleFactor(0.5)
-            Text(label).font(.heading(9)).tracking(0.5)
+        VStack(spacing: 3) {
+            Text(value).font(.digits(23)).lineLimit(1).minimumScaleFactor(0.5)
+            Text(label).font(.heading(9.5)).tracking(0.35).multilineTextAlignment(.center)
         }
-        .foregroundStyle(fill == Palette.card ? Palette.ink : Palette.inkFixed)
-        .frame(maxWidth: .infinity, minHeight: 74)
-        .sticker(fill, radius: 18, shadow: 4)
+        .foregroundStyle(Palette.ink)
+        .frame(maxWidth: .infinity, minHeight: 66)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(fill == Palette.card ? Palette.card : fill.opacity(0.22))
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        )
     }
 }

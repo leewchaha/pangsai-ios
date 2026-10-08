@@ -22,6 +22,13 @@ Linux tests: source scratchpad env.sh; cd Tools/LinuxCore; swift build --build-t
 
 ---
 
+## Home drawer / points / location follow-up (2026-10-07)
+
+- Poop location attachment defaults ON for new/unprompted users. iOS location permission is requested contextually on the first located poop; denial turns the default back off. No background tracking was added.
+- Removed the daily points cap. The per-session cap and tap-rate protection remain.
+- Repriced the cosmetic ladder for an uncapped-per-day economy: 120 PTS for the first paid cosmetic up to 12,000 PTS for Legendary. Existing unlock purchase costs remain historical.
+- Home's poop activity surface is now a pull-up drawer. Collapsed state shows only the POOPING/current-session control; pulling up reveals invites, friend status, and today's compact status.
+
 ## Session 2 (2026-10-07): review + handoff gap closure
 
 Verification done (no Xcode available): three independent read-only reviews against the iOS 26.5 SDK
@@ -43,7 +50,7 @@ Fixed:
   Owner can remove members (share participant + records).
 - Unfriend revocation self-heals (`reconcileHistoryShare`, at most every 10 min).
 - Rule 11: joining a group no longer copies the last 31 days; groups only see poops logged after joining.
-- Points: import never brings points; daily cap keyed on `createdAt` (can't dodge by editing start).
+- Points: import never brings points; there is no daily earning cap. The per-session cap and anti-auto-click rate limit remain, while cosmetic prices are scaled for long-term progression.
 - Bug: clearing the end time of a finished timer made it "live" again → blocked in Store + editor.
 - Notification JOIN (PWM / party) counts +1 and starts the timer before any network
   (`attachToPWM` / `attachToParty` attach the already-counted poop later; never double-counts).
@@ -81,3 +88,47 @@ Known limits / open product decisions (documented, not bugs):
   plus a Codemagic UI troubleshooting guide in `docs/SETUP.md`.
 - No app Swift code, signing identities, or profiles changed; actual TestFlight signing
   requires the account owner to configure their private credentials in Codemagic.
+
+## Session 3 (2026-10-08): user audit fixes, Home activity avatar, points re-audit
+
+No Swift toolchain was available (download.swift.org / registries blocked), so nothing here was compiled or
+run. Three independent read-only reviews checked the diff for compile errors and traced every points/zip test
+by hand. **First Codemagic build will be the compile check.**
+
+- Points: removed the 30/60-tap tiers (taps 61+ silently paid 0 while the 50-pt cap was usually not
+  reached → "tapping stops giving anything"). Now every earning tap = 1 pt (crit +1) until the 50-pt session
+  cap; session screen shows a meter + "SESSION FULL". Deleting a poop banks its points in
+  `UserProfile.bankedHalfPoints` (max-merged across devices); Undo still erases a mis-tap fully. New
+  sessions never show the previous session's combo/cap (`resetTapFeedback`, `tapEventID`).
+- Tab bar overlap: shell no longer relies on an outer `safeAreaInset`; every tab/pushed scroll view uses
+  `.clearsTabBar()` (env `tabBarClearance`). Home pads its overlays/drawer and the Map's safe area itself.
+- Home: my avatar above POOPING (live ring when friends are pooping, red badge for PWM invites, live parties,
+  friend requests); tap opens the drawer. Drawer shows parties + requests again (they were only in the unused
+  `TodayView`), tap/VoiceOver toggle, hidden panel no longer swallows map pans. "Show all pins" button,
+  per-filter empty messages.
+- Pin shines: Canvas + TimelineView, breathing glow + drifting motes, no rotation; static frame in the shop grid.
+- Location (product = location pinning, default ON): honest onboarding copy, removable 📍 chip per poop,
+  Open-iOS-Settings paths when denied. Onboarding: Back button, tips (Settings = tap your poop on YOU, Home avatar).
+- Alerts: poop pings wait out the 6 s Undo window (flushed on background) and are throttled to 1 per 2 min.
+- Groups: POOP WITH starts the timer on INVITE; joined groups default to "PWM / Parties only"; JOIN → PASTE INVITE.
+- Misc: zip import (`ZipReader`), purchase confirmations, calendar legend + exact "+n", full party dates,
+  friend notify menu, friendly iCloud errors, ½-point display, min label sizes, light scheme on session/highlights.
+
+## Session 3b (2026-10-08): Lee's round-2 requests
+
+Still no toolchain here: 4 independent read-only reviews (compile + hand-traced tests) instead. First Codemagic build = compile check.
+
+- Points: no per-session cap (only the 60 ms auto-clicker guard). Prices ×~7–8: cosmetics 800 → 100,000,
+  shines 5,000 → 70,000 (bought items keep their historical cost). Session shows "+N PTS THIS POOP" + balance.
+- Session: swipe down anywhere (when scrolled to top) hides it; button renamed POOP NOW.
+- Home map: every located poop in history; same spot (25 m) = one pin with a count; tap → list (4 rows
+  visible, scroll for more) with who/when/duration. Clustering memoised (`MapPinCache`); open pin re-resolved
+  each render. Tapping empty map closes the pin card and the drawer. YOU: tapping empty space folds sections.
+- Location: no opt-out anywhere (Settings toggle, session chip removal and editor "Remove location" gone).
+  Settings shows iOS permission status + fix. Group "Include locations" kept (sharing scope, not on/off).
+- Calendar: single month grid with only the rows it needs, swipe/chevrons with slide animation, smaller
+  cells, aqua location dot removed (pink = with friends, corner dot).
+- Highlights: stories viewer (tap/hold/swipe, auto-advance 5.5 s, smooth cross-fade into the poster),
+  personal only on YOU; groups get their own stories from the group page (▶ PLAY). Posters redrawn on a fixed
+  360×640 canvas scaled for preview and exported at ×3 (same layout everywhere, every handle shrinks instead of
+  clipping). Profile poster carries a friend-invite QR.

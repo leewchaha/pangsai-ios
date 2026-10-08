@@ -11,7 +11,7 @@ public enum HandleRules {
             switch self {
             case .tooShort: return "At least \(HandleRules.minLength) characters."
             case .tooLong: return "\(HandleRules.maxLength) characters max."
-            case .invalidCharacters: return "Letters, numbers, dots and underscores only."
+            case .invalidCharacters: return "English letters (a–z), numbers, dots and underscores only."
             case .badDots: return "No dots at the start, end, or twice in a row."
             case .notAllowed: return "Pick a different handle."
             }

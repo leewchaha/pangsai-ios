@@ -16,26 +16,28 @@ extension Color {
     }
 }
 
-/// The ShittyFriends palette: warm paper, deep ink, and loud identity colors. Never "black + orange".
+/// High-contrast, playful palette inspired by the calm canvas / loud state-change rhythm of social map apps.
+/// Neutral surfaces dominate; identity colors are reserved for people, live states, rewards, and key actions.
 enum Palette {
-    static let paper = Color.adaptive(light: 0xFFF3DF, dark: 0x16111D)
-    static let paper2 = Color.adaptive(light: 0xFFE9C7, dark: 0x211A2B)
-    static let card = Color.adaptive(light: 0xFFFFFF, dark: 0x251D31)
-    static let ink = Color.adaptive(light: 0x17121F, dark: 0xFFF3DF)
-    /// Always-dark ink for text on saturated fills (they stay bright in dark mode too).
-    static let inkFixed = Color(hex: 0x17121F)
-    static let muted = Color.adaptive(light: 0x6C6178, dark: 0xB3A8C2)
-    static let line = Color.adaptive(light: 0x17121F, dark: 0x0A070D)
+    static let paper = Color.adaptive(light: 0xF7F7F2, dark: 0x111111)
+    static let paper2 = Color.adaptive(light: 0xECECE6, dark: 0x1B1B1B)
+    static let card = Color.adaptive(light: 0xFFFFFF, dark: 0x1D1D1D)
+    static let ink = Color.adaptive(light: 0x101010, dark: 0xF8F8F3)
+    /// Always-dark ink for text on bright saturated fills.
+    static let inkFixed = Color(hex: 0x101010)
+    static let muted = Color.adaptive(light: 0x6A6A66, dark: 0xA9A9A3)
+    static let line = Color.adaptive(light: 0x101010, dark: 0xF8F8F3)
+    static let hairline = Color.adaptive(light: 0xD8D8D2, dark: 0x343434)
 
     static let poop = Color(hex: 0x7A4A24)
-    static let sun = Color(hex: 0xFFD02E)
-    static let pink = Color(hex: 0xFF2E93)
-    static let blue = Color(hex: 0x2F5BFF)
-    static let lime = Color(hex: 0xB8F43A)
-    static let violet = Color(hex: 0x8A4DFF)
-    static let tomato = Color(hex: 0xFF4436)
-    static let aqua = Color(hex: 0x12D9C4)
-    static let tangerine = Color(hex: 0xFF7A1A)
+    static let sun = Color(hex: 0xFFD82E)
+    static let pink = Color(hex: 0xFF3B9D)
+    static let blue = Color(hex: 0x3967FF)
+    static let lime = Color(hex: 0xB9F33D)
+    static let violet = Color(hex: 0x8757FF)
+    static let tomato = Color(hex: 0xFF4C3E)
+    static let aqua = Color(hex: 0x25DCC8)
+    static let tangerine = Color(hex: 0xFF8128)
 
     static func rarity(_ r: Rarity) -> Color {
         switch r {
@@ -56,7 +58,7 @@ extension IdentityColor {
 // MARK: - Type
 
 extension Font {
-    /// Huge expanded black display type ("TUESDAY", "POOPING").
+    /// Display type is intentionally rare. Use it for one hero per screen, not every label.
     static func display(_ size: CGFloat) -> Font {
         .system(size: size, weight: .black, design: .default).width(.expanded)
     }
@@ -79,15 +81,17 @@ extension Font {
 // MARK: - Metrics & motion
 
 enum Metrics {
-    static let stroke: CGFloat = 2.5
-    static let radius: CGFloat = 22
-    static let shadow: CGFloat = 5
+    /// The old UI used 2.5pt outlines and 5pt hard shadows almost everywhere. Keep the graphic language,
+    /// but make it an accent rather than the default visual weight.
+    static let stroke: CGFloat = 1.5
+    static let radius: CGFloat = 20
+    static let shadow: CGFloat = 2
     static let gutter: CGFloat = 18
 }
 
 enum Motion {
-    static let snappy = Animation.spring(response: 0.28, dampingFraction: 0.62)
-    static let bouncy = Animation.spring(response: 0.42, dampingFraction: 0.5)
-    static let slam = Animation.spring(response: 0.22, dampingFraction: 0.45)
-    static let soft = Animation.spring(response: 0.5, dampingFraction: 0.82)
+    static let snappy = Animation.spring(response: 0.28, dampingFraction: 0.72)
+    static let bouncy = Animation.spring(response: 0.42, dampingFraction: 0.62)
+    static let slam = Animation.spring(response: 0.22, dampingFraction: 0.5)
+    static let soft = Animation.spring(response: 0.5, dampingFraction: 0.86)
 }

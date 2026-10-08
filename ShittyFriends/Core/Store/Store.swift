@@ -64,11 +64,15 @@ public final class Store {
 
     @ObservationIgnored public var effectHandler: ((Effect) -> Void)?
     @ObservationIgnored public var onDirty: ((DirtyPart) -> Void)?
+    /// Local platform observers (e.g. ActivityKit) react only to session lifecycle changes.
+    @ObservationIgnored public var onSessionChange: ((PoopEvent?) -> Void)?
     @ObservationIgnored public var clock: () -> Date = { Date() }
     @ObservationIgnored public var calendar: Calendar = CalendarMath.standard()
     @ObservationIgnored public var rules: PointRules = .standard
     @ObservationIgnored public var randomRoll: () -> Double = { Double.random(in: 0..<1) }
     @ObservationIgnored var tapState = TapState()
+    /// The session `tapState` / `lastTap` belong to.
+    @ObservationIgnored var tapEventID: UUID?
 
     public static let undoWindow: TimeInterval = 6
     public static let sessionWindow: TimeInterval = 3 * 3600
@@ -121,7 +125,7 @@ public final class Store {
     public func completeOnboarding(handle: String, avatar: AvatarSpec, color: IdentityColor) {
         let now = clock()
         mutateMy {
-            $0.profile = UserProfile(handle: HandleRules.normalize(handle), avatar: avatar, color: color, equippedCosmetic: $0.profile?.equippedCosmetic ?? .classic, createdAt: $0.profile?.createdAt ?? now, updatedAt: now)
+            $0.profile = UserProfile(handle: HandleRules.normalize(handle), avatar: avatar, color: color, equippedCosmetic: $0.profile?.equippedCosmetic ?? .classic, createdAt: $0.profile?.createdAt ?? now, updatedAt: now, equippedPinShine: $0.profile?.equippedPinShine ?? .classicWhite, pinShines: $0.profile?.pinShines ?? [:], bankedHalfPoints: $0.profile?.bankedHalfPoints ?? 0)
             $0.onboarded = true
         }
         emit([.save(.profile)])
@@ -131,7 +135,7 @@ public final class Store {
     public func saveProfileDraft(handle: String, avatar: AvatarSpec, color: IdentityColor) {
         let now = clock()
         mutateMy {
-            $0.profile = UserProfile(handle: HandleRules.normalize(handle), avatar: avatar, color: color, equippedCosmetic: $0.profile?.equippedCosmetic ?? .classic, createdAt: $0.profile?.createdAt ?? now, updatedAt: now)
+            $0.profile = UserProfile(handle: HandleRules.normalize(handle), avatar: avatar, color: color, equippedCosmetic: $0.profile?.equippedCosmetic ?? .classic, createdAt: $0.profile?.createdAt ?? now, updatedAt: now, equippedPinShine: $0.profile?.equippedPinShine ?? .classicWhite, pinShines: $0.profile?.pinShines ?? [:], bankedHalfPoints: $0.profile?.bankedHalfPoints ?? 0)
         }
         emit([.save(.profile)])
     }
@@ -173,7 +177,9 @@ public final class Store {
         var s = my.settings
         body(&s)
         s.updatedAt = clock()
+        let privateModeChanged = s.lockScreenPrivate != my.settings.lockScreenPrivate
         mutateMy { $0.settings = s }
+        if privateModeChanged { onSessionChange?(liveEvent) }
         emit([.save(.settings), .refreshSubscriptions, .refreshDirectory, .rescheduleSummaries])
     }
 
@@ -197,10 +203,10 @@ public final class Store {
     }
 
     public var pointsBalance: Int {
-        PointsEngine.balance(events: Array(my.events.values), unlocks: Array(my.cosmetics.values))
+        PointsEngine.balance(events: Array(my.events.values), unlocks: Array(my.cosmetics.values), shineUnlocks: Array(profile.pinShines.values), bankedHalfPoints: profile.bankedHalfPoints)
     }
 
-    public var lifetimePoints: Int { PointsEngine.lifetimePoints(events: Array(my.events.values)) }
+    public var lifetimePoints: Int { PointsEngine.lifetimePoints(events: Array(my.events.values), bankedHalfPoints: profile.bankedHalfPoints) }
 
     public func stats(in interval: DateInterval? = nil) -> PoopStats {
         StatsCalculator.compute(Array(my.events.values), in: interval, now: clock(), calendar: calendar)
@@ -308,7 +314,7 @@ public final class Store {
         liveSessions().first { $0.session.id == id }
     }
 
-    /// Open sessions I already finished while someone else is still pooping (watch + react from TODAY).
+    /// Open sessions I already finished while someone else is still pooping (watch + react from HOME).
     public func watchableSessions(now: Date? = nil) -> [LiveSessionView] {
         guard let uid = my.userID else { return [] }
         return liveSessions(now: now).filter { v in
@@ -412,6 +418,31 @@ public final class Store {
         mutateMy { $0.cosmetics[id] = CosmeticUnlock(id: id, unlockedAt: self.clock(), cost: id.price) }
         emit([.save(.cosmetic(id)), .cosmeticUnlocked(id), .haptic(.success)])
         evaluateAchievements()
+    }
+
+    public var ownedPinShines: [PinShineID] {
+        let purchased = Set(profile.pinShines.keys)
+        return PinShineID.allCases.filter { $0 == .classicWhite || purchased.contains($0) }
+    }
+
+    public func purchasePinShine(_ id: PinShineID) throws {
+        if ownedPinShines.contains(id) { throw PurchaseError.alreadyOwned }
+        let balance = pointsBalance
+        guard balance >= id.price else { throw PurchaseError.insufficientPoints(needed: id.price - balance) }
+        guard var p = my.profile else { return }
+        p.pinShines[id] = PinShineUnlock(id: id, unlockedAt: clock(), cost: id.price)
+        p.updatedAt = clock()
+        mutateMy { $0.profile = p }
+        emit([.save(.profile), .haptic(.success)])
+    }
+
+    public func equipPinShine(_ id: PinShineID) {
+        guard ownedPinShines.contains(id), var p = my.profile else { return }
+        guard p.equippedPinShine != id else { return }
+        p.equippedPinShine = id
+        p.updatedAt = clock()
+        mutateMy { $0.profile = p }
+        emit([.save(.profile)] + refreshMyMemberRecords())
     }
 
     public func equip(_ id: CosmeticID) {

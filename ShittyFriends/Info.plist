@@ -31,6 +31,8 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>CKSharingSupported</key>
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
@@ -41,6 +43,8 @@
 	<string>Scan a friend's or group's ShittyFriends QR code.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Attach where a poop happened, only when you log one. Never tracked in the background.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save your Highlights posters to Photos.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -65,9 +69,19 @@
 	</array>
 	<key>UIStatusBarStyle</key>
 	<string>UIStatusBarStyleDefault</string>
-	<key>UISupportedInterfaceOrientations</key>
+	<!-- Keep iPhone portrait-only, but explicitly satisfy App Store/iPad multitasking
+	     validation with all four iPad orientations. Device-specific keys prevent
+	     the iPad requirement from enabling landscape rotation on iPhone. -->
+	<key>UISupportedInterfaceOrientations~iphone</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 </dict>
 </plist>

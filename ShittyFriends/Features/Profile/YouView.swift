@@ -5,6 +5,9 @@ struct YouView: View {
     @Environment(AppModel.self) private var model
     @State private var editing = false
     @State private var period: HighlightPeriod = .week
+    @State private var showStats = false
+    @State private var showTrophies = false
+    @State private var showCollection = false
 
     private var store: Store { model.store }
 
@@ -15,83 +18,234 @@ struct YouView: View {
         let s = store.stats(in: interval)
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    // Identity
-                    HStack(spacing: 16) {
-                        AvatarView(spec: p.avatar, color: p.color, size: 96)
-                        VStack(alignment: .leading, spacing: 6) {
-                            HandleText(handle: p.handle, size: 26)
-                            Text("\(store.pointsBalance) POINTS").font(.heading(13)).foregroundStyle(Palette.inkFixed)
-                                .padding(.horizontal, 10).padding(.vertical, 5)
-                                .background(Capsule().fill(Palette.sun))
-                                .overlay(Capsule().strokeBorder(Palette.line, lineWidth: 2))
-                            Button("EDIT") { editing = true }
-                                .font(.heading(12))
-                                .foregroundStyle(Palette.ink)
-                        }
-                        Spacer()
-                        Object3DImage(subject: .poop(p.equippedCosmetic), size: 74)
-                    }
+                VStack(alignment: .leading, spacing: 16) {
+                    profileHeader(p)
+                    quickLinks
 
-                    HStack(spacing: 10) {
-                        NavigationLink { FriendsView() } label: {
-                            Label("FRIENDS · \(store.activeFriendLinks.count)", systemImage: "person.2.fill")
-                                .font(.heading(13)).foregroundStyle(Palette.inkFixed)
-                                .frame(maxWidth: .infinity, minHeight: 50)
-                                .sticker(Palette.aqua, radius: 16, shadow: 4)
-                        }
-                        NavigationLink { SettingsView() } label: {
-                            Label("SETTINGS", systemImage: "gearshape.fill")
-                                .font(.heading(13)).foregroundStyle(Palette.ink)
-                                .frame(maxWidth: .infinity, minHeight: 50)
-                                .sticker(Palette.card, radius: 16, shadow: 4)
-                        }
-                    }
-                    .buttonStyle(PressableStyle())
-
-                    // Stats
                     Picker("Period", selection: $period) {
                         Text("TODAY").tag(HighlightPeriod.day)
                         Text("WEEK").tag(HighlightPeriod.week)
                         Text("MONTH").tag(HighlightPeriod.month)
                     }
                     .pickerStyle(.segmented)
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                        StatTile(value: "\(s.total)", label: "POOPS", fill: p.color.color)
-                        StatTile(value: "\(s.activeDays)", label: "ACTIVE DAYS")
-                        StatTile(value: String(format: "%.1f", s.averagePerActiveDay), label: "PER DAY")
-                        StatTile(value: s.commonWindowLabel.map { String($0.prefix(5)) } ?? "—", label: "PRIME TIME")
-                        StatTile(value: s.longestSession.map { StatsCalculator.formatDuration($0) } ?? "—", label: "LONGEST")
-                        StatTile(value: s.shortestSession.map { StatsCalculator.formatDuration($0) } ?? "—", label: "FASTEST")
-                        StatTile(value: "\(s.pwmCount)", label: "POOP WITH ME")
-                        StatTile(value: "\(s.partyCount)", label: "PARTIES")
-                        StatTile(value: "\(all.currentStreak)🔥", label: "STREAK")
-                    }
-                    if let place = all.mostUsedPlace {
-                        InfoBanner(text: "📍 Most-used throne: \(place) · \(all.uniquePlaces) places · \(all.countries) countries", fill: Palette.paper2)
-                    }
-                    Text("Stats are for fun, not medical advice.")
-                        .font(.ui(11, .medium))
-                        .foregroundStyle(Palette.muted)
+
+                    statSnapshot(s: s, all: all, accent: p.color)
 
                     Button {
-                        model.sheet = .highlights(period, Date())
+                        withAnimation(Motion.snappy) { showStats.toggle() }
                     } label: {
-                        Label(period.title, systemImage: "sparkles")
+                        RevealRow(title: "ALL STATS", detail: showStats ? "HIDE" : "VIEW", symbol: "chart.bar.fill", expanded: showStats, accent: p.color.color)
                     }
-                    .buttonStyle(.sticker(Palette.violet, ink: .white))
+                    .buttonStyle(PressableStyle())
 
-                    TrophyRoom()
-                    CollectionSection()
+                    if showStats {
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                            StatTile(value: "\(s.total)", label: "POOPS", fill: p.color.color)
+                            StatTile(value: "\(s.activeDays)", label: "ACTIVE DAYS")
+                            StatTile(value: String(format: "%.1f", s.averagePerActiveDay), label: "PER DAY")
+                            StatTile(value: s.commonWindowLabel.map { String($0.prefix(5)) } ?? "—", label: "PRIME TIME")
+                            StatTile(value: s.longestSession.map { StatsCalculator.formatDuration($0) } ?? "—", label: "LONGEST")
+                            StatTile(value: s.shortestSession.map { StatsCalculator.formatDuration($0) } ?? "—", label: "FASTEST")
+                            StatTile(value: "\(s.pwmCount)", label: "POOP WITH ME")
+                            StatTile(value: "\(s.partyCount)", label: "PARTIES")
+                            StatTile(value: "\(all.currentStreak)🔥", label: "CURRENT STREAK")
+                        }
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+
+                        if let place = all.mostUsedPlace {
+                            InfoBanner(text: "📍 All-time most-used throne: \(place) · \(all.uniquePlaces) places · \(all.countries) countries", fill: Palette.paper2)
+                        }
+                        Text("Stats are for fun, not medical advice.")
+                            .font(.ui(11, .medium))
+                            .foregroundStyle(Palette.muted)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            model.sheet = .highlights(period, Date())
+                        } label: {
+                            HStack {
+                                Image(systemName: "sparkles")
+                                Text(period.title).font(.heading(13))
+                                Spacer()
+                                Image(systemName: "arrow.up.right")
+                            }
+                            .foregroundStyle(Palette.paper)
+                            .padding(.horizontal, 16)
+                            .frame(height: 50)
+                            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Palette.ink))
+                        }
+                        .buttonStyle(PressableStyle())
+
+                        Button {
+                            model.sheet = .profilePoster
+                        } label: {
+                            HStack {
+                                Image(systemName: "person.crop.square")
+                                Text("PROFILE POSTER").font(.heading(12))
+                            }
+                            .foregroundStyle(Palette.ink)
+                            .frame(width: 146, height: 50)
+                            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Palette.card))
+                        }
+                        .buttonStyle(PressableStyle())
+                    }
+
+                    Button {
+                        withAnimation(Motion.snappy) { showTrophies.toggle() }
+                    } label: {
+                        RevealRow(title: "TROPHY ROOM", detail: "\(store.my.achievements.count)/\(AchievementID.allCases.count)", symbol: "trophy.fill", expanded: showTrophies, accent: Palette.sun)
+                    }
+                    .buttonStyle(PressableStyle())
+                    if showTrophies {
+                        TrophyRoom()
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    Button {
+                        withAnimation(Motion.snappy) { showCollection.toggle() }
+                    } label: {
+                        RevealRow(title: "COLLECTION", detail: "POOPS + PIN SHINES", symbol: "shippingbox.fill", expanded: showCollection, accent: Palette.violet)
+                    }
+                    .buttonStyle(PressableStyle())
+                    if showCollection {
+                        CollectionSection()
+                        PinShineCollectionSection()
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
                 .gutter()
-                .padding(.vertical, 12)
+                .padding(.top, 14)
+                .padding(.bottom, 28)
+                // Tapping empty space (between cards) folds the open sections away.
+                .background {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            guard showStats || showTrophies || showCollection else { return }
+                            withAnimation(Motion.snappy) {
+                                showStats = false
+                                showTrophies = false
+                                showCollection = false
+                            }
+                        }
+                }
             }
             .scrollIndicators(.hidden)
+            .clearsTabBar()
             .background(Palette.paper.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $editing) { EditProfileView().environment(model) }
         }
+    }
+
+    private func profileHeader(_ p: UserProfile) -> some View {
+        HStack(spacing: 14) {
+            AvatarView(spec: p.avatar, color: p.color, size: 76)
+            VStack(alignment: .leading, spacing: 5) {
+                HandleText(handle: p.handle, size: 22)
+                HStack(spacing: 7) {
+                    Text("\(store.pointsBalance) PTS")
+                        .font(.heading(11))
+                        .foregroundStyle(Palette.inkFixed)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Palette.sun))
+                    Button("EDIT") { editing = true }
+                        .font(.heading(10))
+                        .foregroundStyle(Palette.muted)
+                }
+            }
+            Spacer()
+            NavigationLink { SettingsView() } label: {
+                Object3DImage(subject: .poop(p.equippedCosmetic), size: 62)
+                    .frame(width: 64, height: 64)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableStyle())
+            .accessibilityLabel("Settings")
+            .accessibilityHint("Open app settings")
+        }
+    }
+
+    private var quickLinks: some View {
+        NavigationLink { FriendsView() } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(Palette.paper2))
+                Text("FRIENDS")
+                    .font(.heading(12))
+                Spacer()
+                Text("\(store.activeFriendLinks.count)")
+                    .font(.digits(15))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Palette.muted)
+            }
+            .foregroundStyle(Palette.ink)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 50)
+            .calmSurface(Palette.card, radius: 17)
+        }
+        .buttonStyle(PressableStyle())
+    }
+
+    private func statSnapshot(s: PoopStats, all: PoopStats, accent: IdentityColor) -> some View {
+        HStack(spacing: 0) {
+            SnapshotMetric(value: "\(s.total)", label: "POOPS", accent: accent.color)
+            Divider().frame(height: 34)
+            SnapshotMetric(value: "\(all.currentStreak)🔥", label: "CURRENT STREAK", accent: Palette.sun)
+            Divider().frame(height: 34)
+            SnapshotMetric(value: "\(s.uniquePlaces)", label: "PLACES", accent: Palette.aqua)
+        }
+        .padding(.vertical, 12)
+        .calmSurface(Palette.card, radius: 20)
+    }
+}
+
+struct SnapshotMetric: View {
+    var value: String
+    var label: String
+    var accent: Color
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(value).font(.digits(23)).foregroundStyle(Palette.ink).lineLimit(1).minimumScaleFactor(0.55)
+            HStack(spacing: 4) {
+                Circle().fill(accent).frame(width: 6, height: 6)
+                Text(label).font(.heading(9.5)).foregroundStyle(Palette.muted).lineLimit(1).minimumScaleFactor(0.8)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+struct RevealRow: View {
+    var title: String
+    var detail: String
+    var symbol: String
+    var expanded: Bool
+    var accent: Color
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .black))
+                .foregroundStyle(Palette.inkFixed)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(accent))
+            Text(title).font(.heading(12)).foregroundStyle(Palette.ink)
+            Spacer()
+            Text(detail).font(.ui(11, .bold)).foregroundStyle(Palette.muted)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 11, weight: .black))
+                .foregroundStyle(Palette.muted)
+                .rotationEffect(.degrees(expanded ? 180 : 0))
+        }
+        .padding(10)
+        .calmSurface(Palette.card, radius: 17)
     }
 }
 
@@ -190,7 +344,7 @@ struct CollectionSection: View {
         let owned = Set(store.ownedCosmetics)
         VStack(alignment: .leading, spacing: 12) {
             SectionTitle("POOP COLLECTION · \(owned.count)/\(CosmeticID.allCases.count)")
-            Text("Earn points by tapping during a timed session (capped per session and per day — pooping more doesn't help).")
+            Text("Tap the poop during a timed session: every tap pays 1 point, no limit. The rare ones take a while on purpose. Deleting a poop never takes points back.")
                 .font(.ui(12, .medium))
                 .foregroundStyle(Palette.muted)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
@@ -224,6 +378,7 @@ struct CosmeticDetail: View {
     @Environment(\.dismiss) private var dismiss
     var id: CosmeticID
     @State private var pulse = 0
+    @State private var confirmSpend = false
 
     var body: some View {
         let store = model.store
@@ -247,13 +402,10 @@ struct CosmeticDetail: View {
                 .disabled(store.profile.equippedCosmetic == id)
             } else {
                 Button("UNLOCK · \(id.price) PTS") {
-                    do {
-                        try store.purchase(id)
-                        store.equip(id)
-                    } catch Store.PurchaseError.insufficientPoints(let needed) {
-                        model.info("NOT YET", "\(needed) more points. Tap faster next time.")
-                    } catch {
-                        model.info("ALREADY YOURS", "")
+                    if store.pointsBalance >= id.price {
+                        confirmSpend = true
+                    } else {
+                        model.info("NOT YET", "\(id.price - store.pointsBalance) more points. Keep tapping in future sessions.")
                     }
                 }
                 .buttonStyle(.sticker(store.pointsBalance >= id.price ? Palette.lime : Palette.card, ink: Palette.inkFixed))
@@ -264,6 +416,139 @@ struct CosmeticDetail: View {
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Palette.paper.ignoresSafeArea())
+        .confirmationDialog("Unlock \(id.displayName)?", isPresented: $confirmSpend, titleVisibility: .visible) {
+            Button("Spend \(id.price) PTS") {
+                do {
+                    try model.store.purchase(id)
+                    model.store.equip(id)
+                    dismiss()
+                } catch Store.PurchaseError.insufficientPoints(let needed) {
+                    model.info("NOT YET", "\(needed) more points needed.")
+                } catch {
+                    model.info("ALREADY YOURS", "")
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You have \(model.store.pointsBalance) PTS. It's equipped right away.")
+        }
+    }
+}
+
+// MARK: - Pin shines (a separate collection sharing the same points balance)
+
+struct PinShineCollectionSection: View {
+    @Environment(AppModel.self) private var model
+    @State private var preview: PinShineID?
+
+    var body: some View {
+        let store = model.store
+        let owned = Set(store.ownedPinShines)
+        VStack(alignment: .leading, spacing: 12) {
+            SectionTitle("PIN SHINES · \(owned.count)/\(PinShineID.allCases.count)")
+            Text("Shines appear only when someone taps your poop pin on the map.")
+                .font(.ui(12, .medium))
+                .foregroundStyle(Palette.muted)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                ForEach(PinShineID.allCases) { shine in
+                    let has = owned.contains(shine)
+                    let equipped = store.profile.equippedPinShine == shine
+                    Button { preview = shine } label: {
+                        VStack(spacing: 7) {
+                            ZStack {
+                                Circle().fill(Palette.inkFixed.opacity(0.88))
+                                    .frame(width: 60, height: 60)
+                                PinShineEffect(id: shine, animated: false)
+                                    .frame(width: 60, height: 60)
+                                    .clipShape(Circle())
+                                Object3DImage(subject: .poop(.classic), size: 34)
+                            }
+                            .opacity(has ? 1 : 0.75)
+                            Text(shine.displayName.uppercased())
+                                .font(.heading(10))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                            Text(equipped ? "EQUIPPED" : has ? "OWNED" : "\(shine.price) PTS")
+                                .font(.heading(9))
+                                .foregroundStyle(Palette.muted)
+                        }
+                        .foregroundStyle(Palette.ink)
+                        .frame(maxWidth: .infinity, minHeight: 112)
+                        .calmSurface(Palette.card, radius: 18)
+                    }
+                    .buttonStyle(PressableStyle())
+                }
+            }
+        }
+        .sheet(item: $preview) { shine in
+            PinShineDetail(id: shine)
+                .environment(model)
+                .presentationDetents([.medium, .large])
+        }
+    }
+}
+
+struct PinShineDetail: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    var id: PinShineID
+    @State private var confirmSpend = false
+
+    var body: some View {
+        let store = model.store
+        let has = store.ownedPinShines.contains(id)
+        VStack(spacing: 16) {
+            ZStack {
+                // Dark stage so light shines (white, gold) read on a light sheet too.
+                Circle().fill(Palette.inkFixed.opacity(0.9)).frame(width: 160, height: 160)
+                PinShineEffect(id: id).frame(width: 160, height: 160).clipShape(Circle())
+                Object3DImage(subject: .poop(.classic), size: 96)
+            }
+            .frame(height: 170)
+            Text(id.displayName.uppercased()).font(.display(22))
+            Text(id.tagline).font(.ui(14, .medium)).foregroundStyle(Palette.muted)
+            Text("Only visible when your map pin is selected")
+                .font(.ui(11, .medium)).foregroundStyle(Palette.muted)
+            if has {
+                Button(store.profile.equippedPinShine == id ? "EQUIPPED" : "EQUIP") {
+                    store.equipPinShine(id)
+                    dismiss()
+                }
+                .buttonStyle(.sticker(Palette.sun))
+                .disabled(store.profile.equippedPinShine == id)
+            } else {
+                Button("UNLOCK · \(id.price) PTS") {
+                    if store.pointsBalance >= id.price {
+                        confirmSpend = true
+                    } else {
+                        model.info("NOT YET", "\(id.price - store.pointsBalance) more points. Keep tapping in future sessions.")
+                    }
+                }
+                .buttonStyle(.sticker(store.pointsBalance >= id.price ? Palette.lime : Palette.card, ink: Palette.inkFixed))
+                Text("Balance: \(store.pointsBalance) points")
+                    .font(.ui(13, .semibold)).foregroundStyle(Palette.muted)
+            }
+        }
+        .foregroundStyle(Palette.ink)
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.paper.ignoresSafeArea())
+        .confirmationDialog("Unlock \(id.displayName)?", isPresented: $confirmSpend, titleVisibility: .visible) {
+            Button("Spend \(id.price) PTS") {
+                do {
+                    try model.store.purchasePinShine(id)
+                    model.store.equipPinShine(id)
+                    dismiss()
+                } catch Store.PurchaseError.insufficientPoints(let needed) {
+                    model.info("NOT YET", "\(needed) more points needed.")
+                } catch {
+                    model.info("ALREADY YOURS", "")
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You have \(model.store.pointsBalance) PTS. It's equipped right away.")
+        }
     }
 }
 
@@ -283,6 +568,7 @@ struct EditProfileView: View {
                     .gutter()
                     .padding(.vertical, 12)
             }
+            .scrollDismissesKeyboard(.immediately)
             .background(Palette.paper.ignoresSafeArea())
             .navigationTitle("EDIT PROFILE")
             .navigationBarTitleDisplayMode(.inline)
@@ -315,9 +601,8 @@ struct ProfileEditor: View {
 
     var body: some View {
         VStack(spacing: 18) {
+            // No tap-to-randomize: one stray tap used to wipe a hand-built face. 🎲 does it on purpose.
             AvatarView(spec: avatar, color: color, size: 150)
-                .onTapGesture { withAnimation(Motion.bouncy) { avatar = .random() } }
-                .accessibilityLabel("Avatar. Tap to randomize.")
             Button("🎲 RANDOMIZE") { withAnimation(Motion.bouncy) { avatar = .random(); color = .random() } }
                 .font(.heading(12))
                 .foregroundStyle(Palette.ink)

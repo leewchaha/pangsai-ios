@@ -23,16 +23,18 @@ public extension Store {
         let now = clock()
         let event = PoopEvent(source: .timed, startedAt: now, pwmSessionID: pwmSessionID, partyID: partyID, sharedToGroups: true, createdAt: now, updatedAt: now)
         put(event)
-        tapState = TapState()
+        resetTapFeedback()
         undo = UndoToken(eventID: event.id, source: .timed, at: now)
         var effects: [Effect] = [.haptic(.logHeavy), .save(.event(event.id))]
         effects += mirrorEffects(for: event)
         effects.append(.ping(.poop(eventID: event.id, kind: .poopStart)))
-        if attachLocation ?? my.settings.attachLocationByDefault { effects.append(.requestLocation(eventID: event.id)) }
+        // Every poop is pinned (the app is a poop map); there is no per-user or per-poop opt-out.
+        if attachLocation ?? true { effects.append(.requestLocation(eventID: event.id)) }
         if my.settings.longSessionReminder {
             effects.append(.scheduleLongSessionReminder(eventID: event.id, at: now.addingTimeInterval(30 * 60)))
         }
         emit(effects)
+        onSessionChange?(event)
         evaluateAchievements()
         return event
     }
@@ -47,7 +49,7 @@ public extension Store {
         var effects: [Effect] = [.haptic(.logHeavy), .save(.event(event.id))]
         effects += mirrorEffects(for: event)
         effects.append(.ping(.poop(eventID: event.id, kind: .poopInstant)))
-        if attachLocation ?? my.settings.attachLocationByDefault { effects.append(.requestLocation(eventID: event.id)) }
+        if attachLocation ?? true { effects.append(.requestLocation(eventID: event.id)) }
         emit(effects)
         evaluateAchievements()
         return event
@@ -64,6 +66,7 @@ public extension Store {
         effects += mirrorEffects(for: e)
         effects += participantDoneEffects(for: e)
         emit(effects)
+        onSessionChange?(nil)
         if undo?.eventID == id { undo = nil }
         evaluateAchievements()
     }
@@ -72,7 +75,8 @@ public extension Store {
     func performUndo() {
         guard let u = undo, clock().timeIntervalSince(u.at) <= Store.undoWindow + 1 else { undo = nil; return }
         undo = nil
-        delete(u.eventID)
+        // A mis-tap is erased completely, including the few points it may have earned.
+        delete(u.eventID, keepPoints: false)
     }
 
     func clearUndo() { undo = nil }
@@ -117,19 +121,33 @@ public extension Store {
             effects += participantDoneEffects(for: e)
         }
         emit(effects)
+        if wasLive { onSessionChange?(e.isLive ? e : nil) }
         evaluateAchievements()
     }
 
-    func delete(_ id: UUID) {
+    /// Deletes one of my poops. Points it earned are banked on the profile (by default), so cleaning up
+    /// history never lowers the balance or takes back cosmetics that were already bought with them.
+    func delete(_ id: UUID, keepPoints: Bool = true) {
         guard let e = my.events[id] else { return }
-        mutateMy { $0.events[id] = nil }
+        var bankedProfile: UserProfile?
+        if keepPoints, e.halfPoints > 0, var p = my.profile {
+            p.bankedHalfPoints += e.halfPoints
+            p.updatedAt = clock()
+            bankedProfile = p
+        }
+        mutateMy {
+            $0.events[id] = nil
+            if let p = bankedProfile { $0.profile = p }
+        }
         var effects: [Effect] = [.delete(.event(id)), .cancelPings(eventID: id), .cancelLongSessionReminder(eventID: id)]
+        if bankedProfile != nil { effects.append(.save(.profile)) }
         for link in my.groupLinks.values where cache.zones[link.zone]?.events[id] != nil {
             mutateCache { $0.zones[link.zone]?.events[id] = nil }
             effects.append(.delete(.groupEvent(link.zone, id)))
         }
         if e.isLive { effects += participantDoneEffects(for: e, declined: true) }
         emit(effects)
+        if e.isLive { onSessionChange?(nil) }
     }
 
     /// Location arrived from CoreLocation (does not count as a manual adjustment).
@@ -149,10 +167,15 @@ public extension Store {
     func tapPoop() -> TapOutcome? {
         guard var e = liveEvent else { return nil }
         let now = clock()
-        // Keyed on when the session was created (immutable), so editing start times can't dodge the cap.
-        let daily = PointsEngine.dailyHalfPoints(events: Array(my.events.values), on: e.createdAt, calendar: calendar)
         var state = tapState
-        let outcome = PointsEngine.tap(at: now, sessionTapsBefore: e.taps, sessionHalfPointsBefore: e.halfPoints, dailyHalfPointsBefore: daily, state: &state, rules: rules, roll: randomRoll())
+        if tapEventID != e.id {
+            // First tap of this session on this launch (or after switching sessions): never carry
+            // combo / "cap reached" state over from another session.
+            state = TapState()
+            tapEventID = e.id
+            lastTap = nil
+        }
+        let outcome = PointsEngine.tap(at: now, sessionTapsBefore: e.taps, sessionHalfPointsBefore: e.halfPoints, state: &state, rules: rules, roll: randomRoll())
         tapState = state
         e.taps += 1
         e.halfPoints += outcome.gainedHalfPoints
@@ -166,6 +189,13 @@ public extension Store {
     }
 
     // MARK: - Helpers
+
+    /// Clears per-session tap feedback so a new session never shows the previous one's combo or cap.
+    internal func resetTapFeedback() {
+        tapState = TapState()
+        tapEventID = nil
+        lastTap = nil
+    }
 
     internal func put(_ e: PoopEvent) {
         mutateMy { $0.events[e.id] = e }

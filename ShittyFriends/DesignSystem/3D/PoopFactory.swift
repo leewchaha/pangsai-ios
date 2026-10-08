@@ -1,7 +1,7 @@
 import SceneKit
 import UIKit
 
-/// Builds 3D poops: procedural swirl body (from Core's PoopMesh), cute face, cosmetic extras.
+/// Builds faceless 3D poops: procedural swirl body (from Core's PoopMesh), cosmetic extras.
 enum PoopFactory {
     private static var geometryCache: [String: SCNGeometry] = [:]
     private static var layoutCache: [String: FaceLayout] = [:]
@@ -51,7 +51,7 @@ enum PoopFactory {
     }
 
     /// A complete poop. The node's origin is at the bottom center; it is ~1.1 units tall.
-    static func node(_ id: CosmeticID, face: Bool = true, lowPoly: Bool = false) -> SCNNode {
+    static func node(_ id: CosmeticID, lowPoly: Bool = false) -> SCNNode {
         var shape = shape(for: id)
         if lowPoly { shape = shape.lowPoly }
         let root = SCNNode()
@@ -62,52 +62,8 @@ enum PoopFactory {
         body.name = "body"
         root.addChildNode(body)
         let f = layout(shape)
-        if face { root.addChildNode(faceNode(f, angry: id == .devil)) }
         addExtras(id, to: root, top: f.top)
         return root
-    }
-
-    private static func faceNode(_ f: FaceLayout, angry: Bool) -> SCNNode {
-        let face = SCNNode()
-        face.name = "face"
-        let r = CGFloat(f.eyeRadius) * 1.25
-        for side in [-1.0, 1.0] {
-            let eye = SCNNode(geometry: SCNSphere(radius: r))
-            eye.geometry?.materials = [Materials.eyeWhite]
-            eye.position = SCNVector3(Float(side * f.eyeSpacing), Float(f.eyeY + 0.04), Float(f.eyeZ - Double(r) * 0.2))
-            eye.scale = SCNVector3(1, 1.15, 0.7)
-            let pupil = SCNNode(geometry: SCNSphere(radius: r * 0.55))
-            pupil.geometry?.materials = [Materials.ink]
-            pupil.position = SCNVector3(Float(-side * 0.012), -0.01, Float(r * 0.62))
-            let glint = SCNNode(geometry: SCNSphere(radius: r * 0.17))
-            glint.geometry?.materials = [Materials.emissive(.white)]
-            glint.position = SCNVector3(Float(r * 0.18), Float(r * 0.22), Float(r * 0.5))
-            pupil.addChildNode(glint)
-            eye.addChildNode(pupil)
-            if angry {
-                let brow = SCNNode(geometry: SCNBox(width: r * 1.8, height: r * 0.35, length: r * 0.4, chamferRadius: r * 0.15))
-                brow.geometry?.materials = [Materials.ink]
-                brow.position = SCNVector3(0, Float(r * 1.05), Float(r * 0.45))
-                brow.eulerAngles.z = Float(side * 0.45)
-                eye.addChildNode(brow)
-            }
-            face.addChildNode(eye)
-        }
-        // Smile: a crescent extruded from a bezier path, sitting on the coil below the eyes.
-        let w = CGFloat(f.mouthWidth)
-        let path = UIBezierPath()
-        path.move(to: CGPoint(x: -w / 2, y: 0))
-        path.addQuadCurve(to: CGPoint(x: w / 2, y: 0), controlPoint: CGPoint(x: 0, y: -w * 0.75))
-        path.addQuadCurve(to: CGPoint(x: -w / 2, y: 0), controlPoint: CGPoint(x: 0, y: -w * 0.32))
-        path.close()
-        path.flatness = 0.002
-        let mouthShape = SCNShape(path: path, extrusionDepth: 0.04)
-        mouthShape.materials = [Materials.ink]
-        let mouth = SCNNode(geometry: mouthShape)
-        // SCNShape extrudes symmetrically around z = 0, so its front face sits 0.02 in front of the node.
-        mouth.position = SCNVector3(0, Float(f.mouthY + Double(w) * 0.25), Float(f.mouthZ - 0.002))
-        face.addChildNode(mouth)
-        return face
     }
 
     private static func addExtras(_ id: CosmeticID, to root: SCNNode, top: Double) {

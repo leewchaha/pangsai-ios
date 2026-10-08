@@ -4,7 +4,8 @@ struct OnboardingFlow: View {
     @Environment(AppModel.self) private var model
     @State private var step = 0
     /// Neutral age screen: date of birth is asked, checked, and never stored.
-    @State private var birthDate = Date()
+    /// Starts near a typical birth year so nobody scrolls back decades from today.
+    @State private var birthDate = Calendar.current.date(from: DateComponents(year: 2000, month: 1, day: 1)) ?? Date()
     @State private var pickedBirthDate = false
     @AppStorage("sf.ageBlocked") private var ageBlocked = false
     @State private var confirmUnderage = false
@@ -19,9 +20,27 @@ struct OnboardingFlow: View {
         ZStack {
             colors[min(step, colors.count - 1)].ignoresSafeArea().animation(Motion.soft, value: step)
             VStack(spacing: 0) {
-                HStack(spacing: 6) {
-                    ForEach(0..<6, id: \.self) { i in
-                        Capsule().fill(i <= step ? Palette.inkFixed : Palette.inkFixed.opacity(0.2)).frame(height: 5)
+                HStack(spacing: 10) {
+                    // Back (steps 2–6). The age step is the door, so it has nothing behind it.
+                    Button {
+                        Haptics.tick()
+                        step = max(0, step - 1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .black))
+                            .foregroundStyle(Palette.inkFixed)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.white.opacity(0.55)))
+                    }
+                    .buttonStyle(PressableStyle())
+                    .opacity(step > 0 ? 1 : 0)
+                    .disabled(step == 0)
+                    .accessibilityLabel("Back")
+                    .accessibilityHidden(step == 0)
+                    HStack(spacing: 6) {
+                        ForEach(0..<6, id: \.self) { i in
+                            Capsule().fill(i <= step ? Palette.inkFixed : Palette.inkFixed.opacity(0.2)).frame(height: 5)
+                        }
                     }
                 }
                 .gutter()
@@ -173,7 +192,7 @@ struct OnboardingFlow: View {
                     .font(.display(22))
             }
             .foregroundStyle(Palette.inkFixed)
-            Text("Either way, +1 counts the moment you tap. Tap the poop during a timer to earn points for collectible poops.")
+            Text("Either way, +1 counts the moment you tap. During a timer, tap the big poop: every tap pays 1 point, for as long as the timer runs. Spend points on collectible poops.")
                 .font(.ui(15, .medium))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Palette.inkFixed.opacity(0.85))
@@ -217,20 +236,42 @@ struct OnboardingFlow: View {
     // MARK: 6
 
     private var location: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Text("📍").font(.system(size: 80))
-            Text("ADD WHERE\nYOU POOP?").font(.display(30)).multilineTextAlignment(.center).foregroundStyle(Palette.inkFixed)
-            Text("ShittyFriends can attach your location to a poop so friends can see where it happened. Optional, per poop, never in the background. We'll ask when you first tap 📍.")
-                .font(.ui(15, .medium))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(Palette.inkFixed.opacity(0.85))
-            Spacer()
-            Button("START POOPING") { finish() }
-                .buttonStyle(.sticker(.white, ink: Palette.inkFixed, height: 62))
+        ScrollView {
+            VStack(spacing: 16) {
+                Text("📍").font(.system(size: 64)).padding(.top, 24)
+                Text("EVERY POOP\nGETS A PIN").font(.display(30)).multilineTextAlignment(.center).foregroundStyle(Palette.inkFixed)
+                Text("Your poops land on the map so friends can see where it happened. Location is read once when you log, never in the background. iOS asks the first time you poop.")
+                    .font(.ui(15, .medium))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Palette.inkFixed.opacity(0.85))
+                VStack(alignment: .leading, spacing: 12) {
+                    tip("📍", "Wrong place name?", "Rename it from the poop in CALENDAR. The pin itself stays where you were.")
+                    tip("⚙️", "Settings live behind your poop", "On the YOU tab, tap your 3D poop (top right) for notifications, location, privacy and your data.")
+                    tip("🙂", "Your face on HOME", "It sits above POOP NOW and lights up when friends are pooping or something's waiting for you. Tap it.")
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .sticker(.white, radius: 20, shadow: 3)
+                Button("START POOPING") { finish() }
+                    .buttonStyle(.sticker(.white, ink: Palette.inkFixed, height: 62))
+                    .padding(.top, 6)
+            }
+            .gutter()
+            .padding(.bottom, 24)
         }
-        .gutter()
-        .padding(.bottom, 20)
+        .scrollIndicators(.hidden)
+    }
+
+    private func tip(_ emoji: String, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(emoji).font(.system(size: 22))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title.uppercased()).font(.heading(12))
+                Text(detail).font(.ui(13, .medium)).opacity(0.8)
+            }
+        }
+        .foregroundStyle(Palette.inkFixed)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -251,7 +292,7 @@ struct OnboardingInviteBlock: View {
                     .buttonStyle(.sticker(Palette.sun))
                 }
             } else if failed || !model.availability.isAvailable {
-                Text(model.availability.message ?? "You can invite friends anytime from TODAY → 👥.")
+                Text(model.availability.message ?? "You can invite friends anytime from HOME → 👥.")
                     .font(.ui(14, .semibold))
                     .foregroundStyle(Palette.inkFixed)
                     .multilineTextAlignment(.center)

@@ -238,4 +238,67 @@ final class CoreLogicTests: XCTestCase {
         let zoomedIn = MapClustering.cluster(pts, latitudeDelta: 0.00001, longitudeDelta: 0.00001)
         XCTAssertEqual(zoomedIn.count, 3)
     }
+
+    func testPreciseMapPinsStayOnActualPoopCoordinateAndIgnoreCameraZoom() throws {
+        let now = Date()
+        let older = MapPoint(id: "a", ownerID: "a", latitude: 36.7000, longitude: 137.2100,
+                             label: "Older", date: now.addingTimeInterval(-90))
+        let newest = MapPoint(id: "b", ownerID: "b", latitude: 36.70008, longitude: 137.21005,
+                              label: "Latest", date: now)
+        let elsewhere = MapPoint(id: "c", ownerID: "c", latitude: 36.7010, longitude: 137.2110,
+                                 label: "Other site", date: now.addingTimeInterval(-60))
+        let clusters = MapClustering.atRecordedLocations([older, elsewhere, newest])
+        XCTAssertEqual(clusters.count, 2)
+        let shared = try XCTUnwrap(clusters.first { $0.count == 2 })
+        XCTAssertEqual(shared.latitude, newest.latitude) // not a visual centroid
+        XCTAssertEqual(shared.longitude, newest.longitude)
+        XCTAssertEqual(shared.ownerIDsByRecency, ["b", "a"])
+        XCTAssertEqual(MapClustering.atRecordedLocations([older, newest], withinMeters: 1).count, 2)
+    }
+
+    func testMapClusterOwnersAreOrderedByMostRecentPoop() {
+        let base = TestClock.date("2026-10-07T10:00:00+09:00")
+        let cluster = MapCluster(id: "x", latitude: 0, longitude: 0, points: [
+            MapPoint(id: "a-old", ownerID: "a", latitude: 0, longitude: 0, label: "A", date: base),
+            MapPoint(id: "c", ownerID: "c", latitude: 0, longitude: 0, label: "C", date: base.addingTimeInterval(30)),
+            MapPoint(id: "a-new", ownerID: "a", latitude: 0, longitude: 0, label: "A", date: base.addingTimeInterval(60)),
+            MapPoint(id: "b", ownerID: "b", latitude: 0, longitude: 0, label: "B", date: base.addingTimeInterval(90))
+        ])
+        XCTAssertEqual(cluster.ownerIDsByRecency, ["b", "a", "c"])
+    }
+
+    func testHomeMapShowsEveryLocatedPoopGroupedBySpot() {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        let home = PoopLocation(latitude: 36.7000, longitude: 137.2100, placeName: "Home")
+        let homeJitter = PoopLocation(latitude: 36.70005, longitude: 137.21004, placeName: "Home")
+        let station = PoopLocation(latitude: 36.7010, longitude: 137.2130, placeName: "Station")
+        let a = store.logInstant(); store.attachLocation(home, to: a.id)
+        clock.advance(3600)
+        let b = store.logInstant(); store.attachLocation(homeJitter, to: b.id)
+        clock.advance(3600)
+        let c = store.logInstant(); store.attachLocation(station, to: c.id)
+        clock.advance(60)
+        _ = store.logInstant() // no location: not on the map
+
+        let points = store.mapPoints(includeMine: true, friendIDs: [], groupZones: [])
+        XCTAssertEqual(points.count, 3, "history, not just the latest poop")
+        let clusters = MapClustering.atRecordedLocations(points)
+        XCTAssertEqual(clusters.count, 2)
+        let homeCluster = clusters.first { $0.count == 2 }
+        XCTAssertNotNil(homeCluster)
+        XCTAssertEqual(homeCluster?.pointsByRecency.map(\.id), [b.id.uuidString, a.id.uuidString])
+        XCTAssertEqual(homeCluster?.ownerIDsByRecency.count, 1)
+    }
+
+    func testPersonalHighlightsIgnoreFriends() {
+        let clock = TestClock()
+        let (store, _) = TestEnv.store(clock: clock)
+        store.logInstant()
+        clock.advance(600)
+        store.logInstant()
+        let cards = store.myHighlightCards(period: .day)
+        XCTAssertEqual(cards.first { $0.kind == .total }?.headline, "2")
+        XCTAssertFalse(cards.contains { $0.kind == .throneOccupant || $0.kind == .poopBuddies }, "solo highlights never rank other people")
+    }
 }

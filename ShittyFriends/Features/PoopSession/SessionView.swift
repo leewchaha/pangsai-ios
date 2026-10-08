@@ -7,6 +7,13 @@ struct SessionView: View {
     @State private var completed: PoopEvent?
     @State private var showPicker = false
     @State private var showLocationAsk = false
+    /// Swipe-down-to-hide: live drag distance and whether the content is scrolled to the top.
+    /// Visual offset; a GestureState so a cancelled drag (scroll view takeover) never leaves it stuck.
+    @GestureState(resetTransaction: Transaction(animation: Motion.snappy)) private var dragY: CGFloat = 0
+    @State private var scrollAtTop = true
+    /// Drag translation at the moment the content was at the top; the hide distance counts from
+    /// here, so scrolling back up in the same drag doesn't jump straight into a hide.
+    @State private var topBaseline: CGFloat?
     @State private var pops: [TapPop] = []
     @State private var confetti = 0
 
@@ -19,17 +26,23 @@ struct SessionView: View {
                 .ignoresSafeArea()
             BlobBackground(colors: [Palette.sun, color.color, Palette.pink], intensity: 0.25)
                 .opacity(0.6)
-            if let done = completed {
-                DoneCard(event: done) { dismiss() }
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
-            } else if let live = store.liveEvent {
-                live_(live)
-            } else {
-                Color.clear.onAppear { dismiss() }
+            Group {
+                if let done = completed {
+                    DoneCard(event: done) { dismiss() }
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                } else if let live = store.liveEvent {
+                    live_(live)
+                } else {
+                    Color.clear.onAppear { dismiss() }
+                }
             }
+            .offset(y: dragY * 0.6)
+            .opacity(1 - min(0.35, Double(dragY) / 600))
             ConfettiBurst(trigger: confetti)
                 .allowsHitTesting(false)
         }
+        .scaleEffect(1 - min(0.06, dragY / 3000))
+        .simultaneousGesture(swipeDownToHide)
         .overlay(alignment: .top) { ToastStack().padding(.top, 6) }
         .sheet(isPresented: $showPicker) {
             PWMPickerView(existing: store.liveEvent?.pwmSessionID.flatMap { store.liveSession($0) })
@@ -46,10 +59,44 @@ struct SessionView: View {
         .onChange(of: model.openPWM) { _, new in if new != nil { model.openPWM = nil } }
     }
 
+    /// Swipe down anywhere (when not scrolled) to hide the session; the timer keeps running.
+    private var swipeDownToHide: some Gesture {
+        DragGesture(minimumDistance: 24, coordinateSpace: .global)
+            .updating($dragY) { value, state, _ in
+                guard let base = topBaseline else { state = 0; return }
+                let dy = value.translation.height - base
+                state = (dy > 0 && abs(value.translation.width) < value.translation.height) ? dy : 0
+            }
+            .onChanged { value in
+                let atTop = scrollAtTop || completed != nil
+                if !atTop {
+                    topBaseline = nil
+                } else if topBaseline == nil || value.translation.height < (topBaseline ?? 0) {
+                    // First moment at the top in this drag (or a stale value from a cancelled one).
+                    topBaseline = max(0, value.translation.height)
+                }
+            }
+            .onEnded { value in
+                defer { topBaseline = nil }
+                guard let base = topBaseline else { return }
+                let dy = value.translation.height - base
+                let downward = dy > 0 && abs(value.translation.width) < value.translation.height
+                if downward && (dy > 130 || value.predictedEndTranslation.height - base > 320) {
+                    Haptics.tick()
+                    dismiss()
+                }
+            }
+    }
+
     // MARK: Live
 
     private func live_(_ live: PoopEvent) -> some View {
         VStack(spacing: 0) {
+            Capsule()
+                .fill(Palette.inkFixed.opacity(0.28))
+                .frame(width: 40, height: 5)
+                .padding(.top, 6)
+                .accessibilityHidden(true)
             topBar(live)
             ScrollView {
                 VStack(spacing: 14) {
@@ -87,12 +134,19 @@ struct SessionView: View {
                 .padding(.bottom, 30)
             }
             .scrollIndicators(.hidden)
+            .scrollBounceBehavior(.basedOnSize)
+            .onScrollGeometryChange(for: Bool.self) { geo in
+                geo.contentOffset.y + geo.contentInsets.top <= 1
+            } action: { _, atTop in
+                scrollAtTop = atTop
+            }
         }
     }
 
     private func topBar(_ live: PoopEvent) -> some View {
         HStack {
             Button { dismiss() } label: {
+                // Also: swipe down anywhere.
                 Image(systemName: "chevron.down")
                     .font(.system(size: 18, weight: .black))
                     .foregroundStyle(Palette.inkFixed)
@@ -104,8 +158,10 @@ struct SessionView: View {
             Spacer()
             undoPill(live)
             Spacer()
+            // Every poop is pinned. The chip only shows where; when the fix is missing (no permission,
+            // no signal) tapping it tries again.
             Button {
-                if live.location != nil { return }
+                guard live.location == nil else { return }
                 if model.location.isAuthorized {
                     attachLocation(live.id)
                 } else {
@@ -113,14 +169,15 @@ struct SessionView: View {
                 }
             } label: {
                 Text(live.location.map { "📍 " + $0.label } ?? "📍 ADD LOCATION")
+                    .lineLimit(1)
                     .font(.heading(12))
                     .foregroundStyle(Palette.inkFixed)
-                    .lineLimit(1)
                     .padding(.horizontal, 12)
                     .frame(height: 40)
                     .sticker(.white, radius: 14, shadow: 3)
             }
             .buttonStyle(PressableStyle())
+            .accessibilityLabel(live.location.map { "Location \($0.label)" } ?? "Add location")
         }
         .gutter()
         .padding(.top, 6)
@@ -198,7 +255,7 @@ struct SessionView: View {
     private func addPop(_ o: TapOutcome, at point: CGPoint) {
         let text: String
         if o.gainedHalfPoints == 0 {
-            text = o.dailyCapped ? "DAILY CAP" : (o.sessionCapped ? "CAPPED" : "·")
+            text = "·" // too fast (auto-clicker guard): animates, earns nothing
         } else if o.isCritical {
             text = "CRIT! +\(formatHalf(o.gainedHalfPoints))"
         } else {
@@ -214,18 +271,27 @@ struct SessionView: View {
         }
     }
 
-    private func formatHalf(_ half: Int) -> String {
-        half % 2 == 0 ? "\(half / 2)" : (half == 1 ? "½" : "\(half / 2)½")
-    }
+    private func formatHalf(_ half: Int) -> String { formatHalfPoints(half) }
 
+    /// Session points. Uncapped: every tap pays for as long as the timer runs.
     private func pointsLine(_ live: PoopEvent) -> some View {
         let last = store.lastTap
-        return VStack(spacing: 4) {
-            Text("+\(formatHalf(live.halfPoints)) POINTS THIS SESSION")
-                .font(.heading(16))
-                .foregroundStyle(Palette.inkFixed)
-                .contentTransition(.numericText(value: live.points))
-                .animation(Motion.snappy, value: live.halfPoints)
+        return VStack(spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("+\(formatHalf(live.halfPoints)) PTS")
+                    .font(.heading(16))
+                    .foregroundStyle(Palette.inkFixed)
+                    .contentTransition(.numericText(value: live.points))
+                    .animation(Motion.snappy, value: live.halfPoints)
+                Text("THIS POOP")
+                    .font(.heading(10))
+                    .foregroundStyle(Palette.inkFixed.opacity(0.6))
+                Spacer()
+                Text("BALANCE \(store.pointsBalance)")
+                    .font(.heading(10))
+                    .foregroundStyle(Palette.inkFixed.opacity(0.65))
+                    .contentTransition(.numericText(value: Double(store.pointsBalance)))
+            }
             if let l = last, l.combo >= 5 {
                 Text("COMBO ×\(l.combo)")
                     .font(.display(CGFloat(16 + 3 * l.comboLevel)))
@@ -233,17 +299,13 @@ struct SessionView: View {
                     .rotationEffect(.degrees(Double(l.combo % 2 == 0 ? -3 : 3)))
                     .animation(Motion.slam, value: l.combo)
             } else if live.taps == 0 {
-                Text("tap tap tap tap tap")
-                    .font(.ui(14, .bold))
+                Text("Tap the poop. Every tap pays, no limit.")
+                    .font(.ui(13, .bold))
                     .foregroundStyle(Palette.inkFixed.opacity(0.6))
-            }
-            if last?.sessionCapped == true {
-                Text("Session cap reached. Respect.")
-                    .font(.ui(13, .semibold))
-                    .foregroundStyle(Palette.inkFixed.opacity(0.7))
+                    .multilineTextAlignment(.center)
             }
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .padding(.horizontal, 16)
         .sticker(.white, radius: 18, shadow: 3)
     }
@@ -254,6 +316,11 @@ struct SessionView: View {
         confetti += 1
         withAnimation(Motion.bouncy) { completed = store.my.events[id] }
     }
+}
+
+/// "3", "½", "3½" from half-point units.
+func formatHalfPoints(_ half: Int) -> String {
+    half % 2 == 0 ? "\(half / 2)" : (half == 1 ? "½" : "\(half / 2)½")
 }
 
 // MARK: - Tap pops
@@ -363,7 +430,7 @@ struct DoneCard: View {
                 .foregroundStyle(Palette.inkFixed.opacity(0.8))
             HStack(spacing: 12) {
                 stat("\(model.store.todayCount())", "TODAY")
-                stat("+\(Int(event.points.rounded(.down)))", "POINTS")
+                stat("+" + formatHalfPoints(event.halfPoints), "POINTS")
                 stat("\(model.store.pointsBalance)", "BALANCE")
             }
             .padding(.top, 8)
@@ -411,19 +478,26 @@ struct LocationAskView: View {
     var body: some View {
         VStack(spacing: 16) {
             Text("📍").font(.system(size: 54))
-            Text("ADD WHERE YOU POOP?").font(.display(24)).multilineTextAlignment(.center)
-            Text("ShittyFriends can attach your location to a poop so friends can see where it happened. Only when you ask — never in the background.")
+            Text("PIN THIS POOP?").font(.display(24)).multilineTextAlignment(.center)
+            Text(model.location.isDenied
+                 ? "Location is turned off for ShittyFriends in iOS Settings, so this poop can't get a pin. Turn it back on there."
+                 : "Every poop gets a pin on the map — that's the app. Location is read once per poop, never in the background.")
                 .font(.ui(15, .medium))
                 .foregroundStyle(Palette.muted)
                 .multilineTextAlignment(.center)
-            Button("ALLOW LOCATION") {
-                Task {
-                    let ok = await model.location.requestAuthorization()
-                    model.store.updateSettings { $0.locationPrompted = true }
-                    done(ok)
+            if model.location.isDenied {
+                OpenSystemSettingsButton(title: "OPEN iOS SETTINGS")
+                    .buttonStyle(.sticker(Palette.aqua))
+            } else {
+                Button("ALLOW LOCATION") {
+                    Task {
+                        let ok = await model.location.requestAuthorization()
+                        model.store.updateSettings { $0.locationPrompted = true }
+                        done(ok)
+                    }
                 }
+                .buttonStyle(.sticker(Palette.aqua))
             }
-            .buttonStyle(.sticker(Palette.aqua))
             Button("NOT NOW") {
                 model.store.updateSettings { $0.locationPrompted = true }
                 done(false)

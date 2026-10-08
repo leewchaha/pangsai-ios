@@ -20,7 +20,8 @@ enum CloudAvailability: Equatable {
         case .noAccount: return "Sign in to iCloud to sync and add friends. Logging still works offline."
         case .restricted: return "iCloud is restricted on this device. Logging works, friends don't."
         case .temporarilyUnavailable: return "iCloud is temporarily unavailable. We'll sync when it's back."
-        case .error(let s): return "iCloud error: \(s)"
+        // The raw reason is logged where it happens; never show CloudKit internals in the UI.
+        case .error: return "iCloud isn't responding right now. Logging still works; we'll sync when it's back."
         }
     }
 }

@@ -17,9 +17,10 @@ import sys
 
 APP_ID = "com.sakara.shittyfriends"
 EXTENSION_ID = APP_ID + ".NotificationService"
+LIVE_ACTIVITY_ID = APP_ID + ".PoopingLiveActivity"
 APP_GROUP = "group.com.sakara.shittyfriends"
 ICLOUD_CONTAINER = "iCloud.com.sakara.shittyfriends"
-TARGET_IDS = {"ShittyFriends": APP_ID, "NotificationService": EXTENSION_ID}
+TARGET_IDS = {"ShittyFriends": APP_ID, "NotificationService": EXTENSION_ID, "PoopingLiveActivity": LIVE_ACTIVITY_ID}
 PROFILE_SUFFIXES = {".mobileprovision", ".provisionprofile"}
 
 
@@ -66,6 +67,27 @@ def profile_team(profile):
     return team[0] if isinstance(team, list) and team else (team if isinstance(team, str) else "")
 
 
+def entitlement_values(value):
+    """Normalize entitlement allowlists from provisioning profiles.
+
+    Apple provisioning profiles may encode some entitlement allowlists as an
+    array (for example ["CloudKit"]) or as the wildcard string "*". The
+    latter means the profile allows all values for that entitlement. Treating
+    "*" as a literal array item caused the old preflight to reject valid
+    iCloud/CloudKit App Store profiles.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def entitlement_allows(value, required):
+    values = entitlement_values(value)
+    return "*" in values or required in values
+
+
 def profile_problems(profile, target_id, expected_team=None):
     ent = profile.get("Entitlements", {})
     problems = []
@@ -83,12 +105,12 @@ def profile_problems(profile, target_id, expected_team=None):
         problems.append("not a distribution/App Store profile (get-task-allow)")
     if "ProvisionedDevices" in profile or profile.get("ProvisionsAllDevices", False):
         problems.append("Ad Hoc/Enterprise profile; need App Store profile")
-    if APP_GROUP not in ent.get("com.apple.security.application-groups", []):
+    if not entitlement_allows(ent.get("com.apple.security.application-groups"), APP_GROUP):
         problems.append(f"App Groups entitlement missing {APP_GROUP}")
     if target_id == APP_ID:
-        if ICLOUD_CONTAINER not in ent.get("com.apple.developer.icloud-container-identifiers", []):
+        if not entitlement_allows(ent.get("com.apple.developer.icloud-container-identifiers"), ICLOUD_CONTAINER):
             problems.append("CloudKit iCloud container not provisioned")
-        if "CloudKit" not in ent.get("com.apple.developer.icloud-services", []):
+        if not entitlement_allows(ent.get("com.apple.developer.icloud-services"), "CloudKit"):
             problems.append("CloudKit capability not provisioned")
         if ent.get("aps-environment") != "production":
             problems.append("production Push Notifications capability not provisioned")
@@ -96,18 +118,52 @@ def profile_problems(profile, target_id, expected_team=None):
 
 
 def read_build_settings(project, scheme, json_file=None):
+    """Read Release/device build settings for every signed target.
+
+    `xcodebuild -scheme ... -showBuildSettings` is not guaranteed to emit build
+    settings for embedded extension dependencies.  The previous preflight used
+    the scheme form and therefore falsely reported that NotificationService had
+    no Release settings even though its profile was installed.
+
+    Query each target directly instead.  `-sdk iphoneos` is intentional: these
+    are the device/App Store signing settings that `build-ipa` will use.  Keep
+    `scheme` in the signature for CLI compatibility with older invocations.
+    """
     if json_file:
         return json.loads(Path(json_file).read_text(encoding="utf-8"))
-    command = ["xcodebuild", "-project", project, "-scheme", scheme,
-               "-configuration", "Release", "-showBuildSettings", "-json"]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise ValueError(f"Cannot inspect Release signing assignments using xcodebuild: {error}") from error
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise ValueError("xcodebuild returned invalid JSON build settings") from error
+
+    rows = []
+    for target in TARGET_IDS:
+        command = [
+            "xcodebuild", "-project", project, "-target", target,
+            "-configuration", "Release", "-sdk", "iphoneos",
+            "-showBuildSettings", "-json",
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            stderr = getattr(error, "stderr", "") or ""
+            detail = stderr.strip().splitlines()[-1] if stderr.strip() else str(error)
+            raise ValueError(
+                f"Cannot inspect Release signing assignment for target {target}: {detail}"
+            ) from error
+        try:
+            target_rows = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"xcodebuild returned invalid JSON build settings for target {target}"
+            ) from error
+        if not isinstance(target_rows, list) or not target_rows:
+            raise ValueError(f"xcodebuild returned no Release build settings for target {target}")
+
+        exact = [row for row in target_rows if row.get("target") == target]
+        row = exact[0] if exact else target_rows[0]
+        if "buildSettings" not in row:
+            raise ValueError(f"xcodebuild omitted buildSettings for target {target}")
+        # Normalize the target name so the assignment map cannot lose the
+        # extension merely because xcodebuild omitted/changed the label.
+        rows.append({"target": target, "buildSettings": row["buildSettings"]})
+    return rows
 
 
 def selected_profile(profiles, name_or_uuid):
@@ -172,7 +228,7 @@ def main(argv=None):
     parser.add_argument("--build-settings-json", help="Use captured xcodebuild JSON in tests")
     args = parser.parse_args(argv)
 
-    print("Checking installed provisioning profiles for BOTH iOS targets (App Store distribution)...", flush=True)
+    print("Checking installed provisioning profiles for ALL THREE iOS targets (App Store distribution)...", flush=True)
     profiles, unreadable = load_profiles(args.profiles_dir or profile_directories())
     if unreadable:
         print(f"WARN: {unreadable} profiles could not be decoded.", file=sys.stderr)
@@ -188,15 +244,34 @@ def main(argv=None):
     if errors:
         for error in errors:
             print("ERROR: " + error, file=sys.stderr)
-        print("FIX: Apple Developer > Certificates, Identifiers & Profiles > Identifiers: ", file=sys.stderr)
-        print("     enable App Groups for BOTH com.sakara.shittyfriends and ", file=sys.stderr)
-        print("     com.sakara.shittyfriends.NotificationService; assign group.com.sakara.shittyfriends.", file=sys.stderr)
-        print("     The main app ALSO needs iCloud/CloudKit and Push Notifications.", file=sys.stderr)
-        print("     REGENERATE separate Apple Distribution/App Store profiles AFTER enabling capabilities.", file=sys.stderr)
-        print("     Codemagic > Team settings > Code signing identities: fetch/upload BOTH new profiles.", file=sys.stderr)
-        print("     See docs/APP_GROUPS_SIGNING_FIX.md. Do not remove the extension's App Group entitlement.", file=sys.stderr)
+
+        missing_extension = any(
+            error.startswith(f"{target}: No installed App Store provisioning profile")
+            for error in errors for target in ("NotificationService", "PoopingLiveActivity")
+        )
+        if missing_extension:
+            print("FIX: Codemagic currently has no stored App Store profile for an extension.", file=sys.stderr)
+            print("     A registered Bundle ID is NOT itself a provisioning profile.", file=sys.stderr)
+            print("     In Codemagic > Code signing identities > iOS provisioning profiles,", file=sys.stderr)
+            print("     Fetch profiles and add the App Store profile for:", file=sys.stderr)
+            print("       com.sakara.shittyfriends.NotificationService", file=sys.stderr)
+            print("       com.sakara.shittyfriends.PoopingLiveActivity", file=sys.stderr)
+            print("     The existing ios_signing bundle rule will then fetch all app + extension profiles.", file=sys.stderr)
+
+        capability_problem = any(
+            phrase in error
+            for error in errors
+            for phrase in ("App Groups entitlement missing", "CloudKit iCloud container not provisioned",
+                           "CloudKit capability not provisioned", "Push Notifications capability not provisioned")
+        )
+        if capability_problem:
+            print("FIX: One of the installed profiles does not contain the entitlement requested by the target.", file=sys.stderr)
+            print("     Check the specific error above, then regenerate/refetch only that profile if needed.", file=sys.stderr)
+            print("     Do not remove App Group/CloudKit entitlements merely to make signing pass.", file=sys.stderr)
+
+        print("     See docs/APP_GROUPS_SIGNING_FIX.md for exact diagnostics.", file=sys.stderr)
         return 2
-    print("PASS: Both targets have the required App Store signing profiles.")
+    print("PASS: All three targets have the required App Store signing profiles.")
     return 0
 
 

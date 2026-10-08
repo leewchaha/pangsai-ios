@@ -43,7 +43,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         quietStartMinutes = 23 * 60
         quietEndMinutes = 7 * 60
         lockScreenPrivate = false
-        attachLocationByDefault = false
+        attachLocationByDefault = true
         locationPrompted = false
         longSessionReminder = true
         blockedUserIDs = []

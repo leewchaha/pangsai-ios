@@ -1,11 +1,11 @@
-import CloudKit
 import UserNotifications
 
-/// Rewrites anonymous CloudKit ping pushes into real alerts, entirely on-device.
+/// Finishes Firebase Cloud Messaging alerts on-device.
 ///
-/// The push only contains an opaque inbox token, a kind, an optional sender group token and an
-/// AES-GCM sealed payload. The app keeps a small directory in the shared App Group container that maps
-/// my tokens to friend handles / group names and keys. Nothing readable ever leaves the devices.
+/// The server already applied everyone's alert preferences and sends a readable alert plus data fields
+/// (`sf_kind`, `sf_sender`, `sf_group`, ...). This extension re-renders the text from those fields so the
+/// **Private lock screen** and **quiet hours** settings of *this device* are honoured even if the server
+/// saw an older copy of them. The settings come from a tiny file the app keeps in the App Group.
 final class NotificationService: UNNotificationServiceExtension {
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var bestAttempt: UNMutableNotificationContent?
@@ -20,30 +20,21 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         bestAttempt = content
 
-        guard let note = CKNotification(fromRemoteNotificationDictionary: request.content.userInfo) as? CKQueryNotification,
-              let fields = note.recordFields,
-              let to = fields[PingField.to] as? String,
-              let kindRaw = fields[PingField.kind] as? String,
-              let kind = PingKind(rawValue: kindRaw) else {
+        let info = request.content.userInfo
+        guard let kindRaw = info[PushField.kind] as? String, let kind = PingKind(rawValue: kindRaw) else {
             contentHandler(content)
             return
         }
 
         let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup).flatMap { PingDirectory.read(from: $0) }
-        let entry = directory?.entries[to]
-        var payload: PingPayload?
-        if let ref = fields[PingField.ref] as? String, let key = entry?.key {
-            payload = try? AESSealer().openPayload(ref, keyBase64URL: key)
-        }
-
         let comps = Calendar.current.dateComponents([.hour, .minute], from: Date())
         let minutes = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         let quiet = directory?.isQuiet(minutesFromMidnight: minutes) ?? false
         let text = NotificationTextBuilder.text(
             kind: kind,
-            entry: entry,
-            senderToken: fields[PingField.from] as? String,
-            payload: payload,
+            sender: info[PushField.sender] as? String,
+            groupName: info[PushField.group] as? String,
+            partyTitle: info[PushField.title] as? String,
             privateMode: directory?.lockScreenPrivate ?? false,
             quiet: quiet
         )
@@ -59,16 +50,6 @@ final class NotificationService: UNNotificationServiceExtension {
             content.sound = .default
             content.interruptionLevel = .active
         }
-
-        // Hand the app what it needs to act on a tap (JOIN, open party...).
-        var info = content.userInfo
-        info["sf_kind"] = kind.rawValue
-        if let s = payload?.sessionID { info["sf_session"] = s }
-        if let g = payload?.groupID { info["sf_group"] = g }
-        if let u = payload?.shareURL, kind == .pwmInvite || kind == .partyInvite { info["sf_share"] = u }
-        if let p = payload?.partyID { info["sf_party"] = p }
-        content.userInfo = info
-
         contentHandler(content)
     }
 

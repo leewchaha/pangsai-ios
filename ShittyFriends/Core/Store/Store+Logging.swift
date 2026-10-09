@@ -94,9 +94,15 @@ public extension Store {
     }
 
     /// Edit times/location afterwards (also how forgotten timers get fixed).
+    ///
+    /// Moving the poop in time or space marks it `manuallyAdjusted`, which takes it out of
+    /// leaderboards, achievements and group trophies (it stays in history and personal stats).
+    /// Renaming the place label, ending a still-running timer, or toggling group sharing are not
+    /// corrections of when/where it happened and leave the flag alone.
     func edit(_ id: UUID, start: Date? = nil, end: Date?? = nil, location: PoopLocation?? = nil, sharedToGroups: Bool? = nil) {
         guard var e = my.events[id] else { return }
         let wasLive = e.isLive
+        let before = e
         if let s = start { e.startedAt = s }
         if let newEnd = end {
             if newEnd == nil && e.source == .timed && !wasLive {
@@ -111,7 +117,7 @@ public extension Store {
         }
         if let loc = location { e.location = loc }
         if let shared = sharedToGroups { e.sharedToGroups = shared }
-        e.manuallyAdjusted = true
+        if Self.isCorrection(from: before, to: e) { e.manuallyAdjusted = true }
         e.updatedAt = clock()
         put(e)
         var effects: [Effect] = [.save(.event(id))]
@@ -123,6 +129,18 @@ public extension Store {
         emit(effects)
         if wasLive { onSessionChange?(e.isLive ? e : nil) }
         evaluateAchievements()
+    }
+
+    /// True when an edit changed when or where the poop happened: the start time, the end time of an
+    /// already finished poop, or the pin's coordinates. A place rename keeps the pin where it was.
+    static func isCorrection(from a: PoopEvent, to b: PoopEvent) -> Bool {
+        if a.startedAt != b.startedAt { return true }
+        if !a.isLive, a.endedAt != b.endedAt { return true }
+        switch (a.location, b.location) {
+        case (nil, nil): return false
+        case (nil, _), (_, nil): return true
+        case (let x?, let y?): return x.latitude != y.latitude || x.longitude != y.longitude
+        }
     }
 
     /// Deletes one of my poops. Points it earned are banked on the profile (by default), so cleaning up
@@ -179,7 +197,7 @@ public extension Store {
         tapState = state
         e.taps += 1
         e.halfPoints += outcome.gainedHalfPoints
-        // Persist locally; the record syncs on DONE to avoid a CloudKit write per tap.
+        // Persist locally; the record syncs on DONE to avoid a server write per tap.
         my.events[e.id] = e
         tapPulse &+= 1
         lastTap = outcome
@@ -205,7 +223,8 @@ public extension Store {
     internal func mirrorEffects(for e: PoopEvent) -> [Effect] {
         guard let uid = my.userID else { return [] }
         var effects: [Effect] = []
-        for link in my.groupLinks.values {
+        // Only groups I am actually a member of: a pending join request has no zone access yet.
+        for link in my.groupLinks.values where link.status == .active {
             let zone = link.zone
             if link.shareEvents && e.sharedToGroups {
                 let ge = GroupEvent(event: e, ownerID: uid, includeLocation: link.shareLocations)

@@ -65,7 +65,7 @@ struct FriendsView: View {
                                     .foregroundStyle(Palette.muted)
                             }
                             Spacer()
-                            Button("CANCEL") { store.cancelPendingLink(link.id) }
+                            Button("CANCEL") { model.cancelPendingLink(link) }
                                 .font(.heading(11))
                                 .foregroundStyle(Palette.ink)
                         }
@@ -483,5 +483,6 @@ struct StatTile: View {
                 .fill(fill == Palette.card ? Palette.card : fill.opacity(0.22))
                 .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
         )
+        .accessibilityElement(children: .combine)
     }
 }

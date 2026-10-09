@@ -51,7 +51,7 @@ public struct PartyView: Hashable, Identifiable {
 }
 
 /// The local-first source of truth. Every user action mutates this synchronously (so +1 is instant)
-/// and emits `Effect`s that the platform layer turns into CloudKit writes, pings, notifications, haptics.
+/// and emits `Effect`s that the platform layer turns into server writes, alerts, notifications, haptics.
 @Observable
 public final class Store {
     public internal(set) var my: MyState
@@ -101,7 +101,10 @@ public final class Store {
         dirty(.cache)
     }
 
-    /// Replace everything (used after loading from disk or when the iCloud account changes).
+    /// Test seam: force local state (e.g. a request that slipped past a block) without side effects.
+    public func mutateMyForTests(_ body: (inout MyState) -> Void) { mutateMy(body) }
+
+    /// Replace everything (used after loading from disk or when the account changes).
     public func replaceAll(my: MyState, cache: CacheState) {
         self.my = my
         self.cache = cache
@@ -176,6 +179,7 @@ public final class Store {
     public func updateSettings(_ body: (inout AppSettings) -> Void) {
         var s = my.settings
         body(&s)
+        s.timeZoneID = TimeZone.current.identifier
         s.updatedAt = clock()
         let privateModeChanged = s.lockScreenPrivate != my.settings.lockScreenPrivate
         mutateMy { $0.settings = s }
@@ -239,6 +243,8 @@ public final class Store {
         }
         for z in cache.zones.values {
             for ps in z.participants.values { if let p = ps[userID] { return p.person } }
+            for rs in z.rsvps.values { if let r = rs[userID] { return r.person } }
+            if let r = z.requests[userID] { return r.person }
         }
         return nil
     }
@@ -262,8 +268,9 @@ public final class Store {
 
     // MARK: - Derived: groups
 
+    /// Groups I'm a member of (join requests still waiting for the owner are in `pendingGroupLinks`).
     public var groupSummaries: [GroupSummary] {
-        my.groupLinks.values.sorted { $0.joinedAt < $1.joinedAt }.map { link in
+        my.groupLinks.values.filter { $0.status == .active }.sorted { $0.joinedAt < $1.joinedAt }.map { link in
             let z = cache.zones[link.zone]
             let members = (z.map { Array($0.members.values) } ?? []).sorted { $0.joinedAt < $1.joinedAt }
             let labels = HandleRules.groupLabels(members.map { ($0.id, $0.person.handle, $0.joinedAt) })
@@ -278,11 +285,12 @@ public final class Store {
     }
 
     /// Weekly leaderboard for a group: (member, count), highest first, ties by handle.
+    /// Only live-logged poops count (`countsForRanking`); manual, edited and imported ones don't.
     public func leaderboard(_ zone: ZoneRef, period: HighlightPeriod = .week, now: Date? = nil) -> [(member: GroupMember, count: Int)] {
         guard let z = cache.zones[zone] else { return [] }
         let interval = period.interval(containing: now ?? clock(), calendar: calendar)
         var counts: [UserID: Int] = [:]
-        for e in z.events.values where interval.contains(e.startedAt) { counts[e.ownerID, default: 0] += 1 }
+        for e in z.events.values where e.countsForRanking && interval.contains(e.startedAt) { counts[e.ownerID, default: 0] += 1 }
         return z.members.values.map { ($0, counts[$0.id] ?? 0) }.sorted {
             $0.count != $1.count ? $0.count > $1.count : $0.member.person.handle.lowercased() < $1.member.person.handle.lowercased()
         }
@@ -300,8 +308,12 @@ public final class Store {
         guard let uid = my.userID else { return [] }
         var out: [LiveSessionView] = []
         for (zone, z) in cache.zones {
-            for s in z.sessions.values where s.state == .open && n.timeIntervalSince(s.createdAt) < Store.sessionWindow {
+            for s in z.sessions.values where s.state == .open {
                 let ps = Array((z.participants[s.id] ?? [:]).values)
+                // A session only ages out once nobody is pooping in it any more (a stale invite that
+                // was never answered). While someone is still in it, it stays live, however long.
+                let anyoneStillIn = ps.contains { $0.status == .joined }
+                guard anyoneStillIn || n.timeIntervalSince(s.createdAt) < Store.sessionWindow else { continue }
                 guard ps.contains(where: { $0.id == uid }) || s.creatorID == uid else { continue }
                 let sorted = ps.sorted { ($0.startedAt ?? .distantFuture) < ($1.startedAt ?? .distantFuture) }
                 out.append(LiveSessionView(zone: zone, session: s, participants: sorted, groupName: groupName(for: zone)))
@@ -310,8 +322,8 @@ public final class Store {
         return out.sorted { $0.session.createdAt > $1.session.createdAt }
     }
 
-    public func liveSession(_ id: UUID) -> LiveSessionView? {
-        liveSessions().first { $0.session.id == id }
+    public func liveSession(_ id: UUID, now: Date? = nil) -> LiveSessionView? {
+        liveSessions(now: now).first { $0.session.id == id }
     }
 
     /// Open sessions I already finished while someone else is still pooping (watch + react from HOME).
@@ -363,23 +375,29 @@ public final class Store {
 
     // MARK: - Achievements
 
+    /// Achievements only see live-logged poops (`countsForRanking`), and only parties that at least
+    /// one other person actually joined (a party you throw for yourself alone is not a party).
     func achievementContext() -> AchievementContext {
         let n = clock()
         var pastYes: [(partyID: UUID, scheduledAt: Date, joined: Bool)] = []
-        let myPartyIDs = Set(my.events.values.compactMap { $0.partyID })
+        let myPartyIDs = Set(my.events.values.filter { $0.countsForRanking }.compactMap { $0.partyID })
         if let uid = my.userID {
             for z in cache.zones.values {
                 for p in z.parties.values where p.status == .scheduled && p.scheduledAt < n {
-                    if z.rsvps[p.id]?[uid]?.response == .yes {
-                        pastYes.append((p.id, p.scheduledAt, myPartyIDs.contains(p.id)))
-                    }
+                    let rsvps = z.rsvps[p.id] ?? [:]
+                    guard rsvps[uid]?.response == .yes else { continue }
+                    // Only parties somebody else turned up to can be attended (or missed).
+                    let othersJoined = rsvps.values.contains { $0.id != uid && $0.joinedAt != nil }
+                    guard othersJoined || my.confirmedSocialParties.contains(p.id) else { continue }
+                    pastYes.append((p.id, p.scheduledAt, myPartyIDs.contains(p.id)))
                 }
             }
         }
         return AchievementContext(
-            events: Array(my.events.values),
+            events: my.events.values.filter { $0.countsForRanking },
             friendCount: activeFriendLinks.count,
             completedSocialSessions: my.confirmedSocialSessions.count,
+            socialParties: my.confirmedSocialParties.count,
             pastYesParties: pastYes,
             ownedCosmetics: ownedCosmetics.count,
             now: n,

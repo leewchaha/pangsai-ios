@@ -170,7 +170,7 @@ public enum PinShineID: String, Codable, CaseIterable, Sendable, Identifiable {
     }
 }
 
-/// Purchases are included in the existing profile CloudKit JSON record, so no new schema is required.
+/// Purchases are part of the profile record (one document), so a purchase never needs a separate write.
 public struct PinShineUnlock: Codable, Hashable, Sendable {
     public var id: PinShineID
     public var unlockedAt: Date

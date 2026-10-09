@@ -116,6 +116,8 @@ struct ActiveSheetView: View {
             HighlightsView(period: .week, reference: Date().addingTimeInterval(-7 * 24 * 3600), groupZone: zone)
         case .profilePoster:
             ProfilePosterSheetView()
+        case .signIn:
+            SignInView(inOnboarding: false)
         }
     }
 }
@@ -206,6 +208,7 @@ struct LiveSessionBar: View {
 
 struct BusyOverlay: View {
     var text: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var spin = false
 
     var body: some View {
@@ -214,12 +217,15 @@ struct BusyOverlay: View {
             VStack(spacing: 14) {
                 Text("💩")
                     .font(.system(size: 46))
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-                    .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: spin)
+                    .rotationEffect(.degrees(spin && !reduceMotion ? 360 : 0))
+                    .animation(reduceMotion ? .default : .linear(duration: 1.1).repeatForever(autoreverses: false), value: spin)
+                    .accessibilityHidden(true)
                 Text(text.uppercased()).font(.heading(15)).foregroundStyle(Palette.inkFixed)
             }
             .padding(28)
             .sticker(Palette.sun)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.updatesFrequently)
         }
         .onAppear { spin = true }
     }

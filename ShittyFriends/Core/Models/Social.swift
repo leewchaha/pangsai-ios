@@ -1,9 +1,10 @@
 import Foundation
 
-/// Identifies a CloudKit record zone independently of CloudKit types.
-/// `ownerName == ZoneRef.currentUser` means the zone lives in my private database.
+/// Identifies a sync "zone" independently of the backend. A zone is one person's history
+/// (`Me`, owner = that person), my private settings/links (`Private`), a group (`G-<id>`) or an
+/// ad-hoc Poop With Me / party space between friends (`S-<id>`).
+/// `ownerName == ZoneRef.currentUser` means I own it.
 public struct ZoneRef: Codable, Hashable, Sendable, CustomStringConvertible {
-    /// Matches CloudKit's `CKCurrentUserDefaultName`.
     public static let currentUser = "__defaultOwner__"
 
     public var ownerName: String
@@ -19,16 +20,26 @@ public struct ZoneRef: Codable, Hashable, Sendable, CustomStringConvertible {
 
     public static let me = ZoneRef(ownerName: currentUser, zoneName: ZoneNames.me)
     public static let privateZone = ZoneRef(ownerName: currentUser, zoneName: ZoneNames.private)
+
+    public static func group(_ id: UUID, ownerID: UserID?, me: UserID?) -> ZoneRef {
+        ZoneRef(ownerName: (ownerID == nil || ownerID == me) ? currentUser : ownerID!, zoneName: ZoneNames.group(id))
+    }
+
+    public static func space(_ id: UUID, ownerID: UserID?, me: UserID?) -> ZoneRef {
+        ZoneRef(ownerName: (ownerID == nil || ownerID == me) ? currentUser : ownerID!, zoneName: ZoneNames.session(id))
+    }
+
+    public var isGroup: Bool { zoneName.hasPrefix(ZoneNames.groupPrefix) }
+    public var isSpace: Bool { zoneName.hasPrefix(ZoneNames.sessionPrefix) }
+    public var groupID: UUID? { ZoneNames.groupID(fromZoneName: zoneName) }
+    public var spaceID: UUID? { ZoneNames.spaceID(fromZoneName: zoneName) }
 }
 
 public enum ZoneNames {
-    /// Shared read-only with full friends: profile, entire poop history, achievements, cosmetics.
+    /// Readable by full friends: profile, entire poop history, achievements, cosmetics.
     public static let me = "Me"
     /// Never shared: settings, friend links, group links, invites.
     public static let `private` = "Private"
-    /// Invite cards: one tiny record per friend invite, each shared by a public read-only link.
-    /// The link is an ordinary https iCloud URL, so it is tappable in any messenger.
-    public static let invites = "Invites"
     public static let groupPrefix = "G-"
     public static let sessionPrefix = "S-"
 
@@ -38,6 +49,11 @@ public enum ZoneNames {
     public static func groupID(fromZoneName name: String) -> UUID? {
         guard name.hasPrefix(groupPrefix) else { return nil }
         return UUID(uuidString: String(name.dropFirst(groupPrefix.count)))
+    }
+
+    public static func spaceID(fromZoneName name: String) -> UUID? {
+        guard name.hasPrefix(sessionPrefix) else { return nil }
+        return UUID(uuidString: String(name.dropFirst(sessionPrefix.count)))
     }
 }
 
@@ -71,91 +87,99 @@ public enum GroupNotifyLevel: String, Codable, CaseIterable, Sendable {
 // MARK: - Friends
 
 public enum FriendLinkStatus: String, Codable, Sendable {
-    /// I scanned their invite and sent a request. Waiting for them to accept.
+    /// I answered their invite and sent a request. Waiting for them to accept.
     case requested
-    /// I accepted their request and shared my history. Waiting for their share to arrive.
+    /// I accepted their request; waiting for the friendship record to come back from the server.
     case awaitingTheirShare
-    /// Both histories shared.
+    /// Friends: both histories are visible.
     case active
 }
 
-/// My private record of a friendship (lives in the Private zone; synced across my devices).
+/// My private record of a friendship (Private zone; synced across my devices).
 public struct FriendLink: Codable, Hashable, Sendable, Identifiable {
     public var id: UUID
     public var userID: UserID?
-    /// Cached identity for display before their shared zone arrives.
+    /// Cached identity for display before their profile arrives.
     public var person: PersonRef?
     public var status: FriendLinkStatus
-    /// Token I listen on for pings from this friend.
-    public var myInbox: InboxToken
-    /// Token I address pings to.
-    public var theirInbox: InboxToken?
-    /// Base64url AES key for encrypted ping payloads in this friendship.
-    public var pairKey: String
     public var notify: FriendNotifyLevel
-    public var theirShareURL: String?
-    /// For `.requested`: the invite token I answered.
+    /// For `.requested`: the invite token I answered, and the request record I created.
     public var inviteToken: String?
+    public var requestID: String?
     public var createdAt: Date
     public var updatedAt: Date
 
-    public init(id: UUID = UUID(), userID: UserID? = nil, person: PersonRef? = nil, status: FriendLinkStatus, myInbox: InboxToken, theirInbox: InboxToken? = nil, pairKey: String, notify: FriendNotifyLevel = .every, theirShareURL: String? = nil, inviteToken: String? = nil, createdAt: Date = Date(), updatedAt: Date = Date()) {
+    public init(id: UUID = UUID(), userID: UserID? = nil, person: PersonRef? = nil, status: FriendLinkStatus, notify: FriendNotifyLevel = .every, inviteToken: String? = nil, requestID: String? = nil, createdAt: Date = Date(), updatedAt: Date = Date()) {
         self.id = id
         self.userID = userID
         self.person = person
         self.status = status
-        self.myInbox = myInbox
-        self.theirInbox = theirInbox
-        self.pairKey = pairKey
         self.notify = notify
-        self.theirShareURL = theirShareURL
         self.inviteToken = inviteToken
+        self.requestID = requestID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, userID, person, status, notify, inviteToken, requestID, createdAt, updatedAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        userID = try c.decodeIfPresent(UserID.self, forKey: .userID)
+        person = try? c.decodeIfPresent(PersonRef.self, forKey: .person)
+        status = (try? c.decode(FriendLinkStatus.self, forKey: .status)) ?? .active
+        notify = (try? c.decode(FriendNotifyLevel.self, forKey: .notify)) ?? .every
+        inviteToken = try? c.decodeIfPresent(String.self, forKey: .inviteToken)
+        requestID = try? c.decodeIfPresent(String.self, forKey: .requestID)
+        createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
+        updatedAt = (try? c.decode(Date.self, forKey: .updatedAt)) ?? createdAt
     }
 }
 
 /// An invite I created (QR / link). Anyone holding it can *request* friendship; I still confirm each request.
 public struct OutgoingInvite: Codable, Hashable, Sendable, Identifiable {
-    public var token: InboxToken
-    public var secret: String
+    public var token: String
     public var createdAt: Date
     public var expiresAt: Date
-    /// https iCloud link of the invite card that carries this invite (tappable in any messenger).
-    public var shareURL: String?
 
     public var id: String { token }
 
-    public init(token: InboxToken = TokenFactory.make(), secret: String = TokenFactory.makeKeyData().base64URLEncodedString(), createdAt: Date = Date(), lifetime: TimeInterval = 7 * 24 * 3600) {
+    public init(token: String = TokenFactory.make(), createdAt: Date = Date(), lifetime: TimeInterval = 7 * 24 * 3600) {
         self.token = token
-        self.secret = secret
         self.createdAt = createdAt
         self.expiresAt = createdAt.addingTimeInterval(lifetime)
+    }
+
+    private enum CodingKeys: String, CodingKey { case token, createdAt, expiresAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        token = try c.decode(String.self, forKey: .token)
+        createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
+        expiresAt = (try? c.decode(Date.self, forKey: .expiresAt)) ?? createdAt.addingTimeInterval(7 * 24 * 3600)
     }
 
     public func isValid(now: Date) -> Bool { now < expiresAt }
 }
 
-/// A friend request somebody sent to one of my invites. Device-local until acted on.
+/// A friend request somebody sent to one of my invites (a `friendRequests` record addressed to me).
 public struct IncomingFriendRequest: Codable, Hashable, Sendable, Identifiable {
+    /// The request record's id.
     public var id: String
-    public var inviteToken: InboxToken
+    public var inviteToken: String
     public var person: PersonRef
-    public var theirInbox: InboxToken
-    public var pairKey: String
     public var receivedAt: Date
 
-    public init(id: String, inviteToken: InboxToken, person: PersonRef, theirInbox: InboxToken, pairKey: String, receivedAt: Date) {
+    public init(id: String, inviteToken: String, person: PersonRef, receivedAt: Date) {
         self.id = id
         self.inviteToken = inviteToken
         self.person = person
-        self.theirInbox = theirInbox
-        self.pairKey = pairKey
         self.receivedAt = receivedAt
     }
 }
 
-/// Read-only copy of a friend's shared "Me" zone.
+/// Read-only copy of a friend's history.
 public struct FriendCache: Codable, Hashable, Sendable {
     public var userID: UserID
     public var zone: ZoneRef
@@ -201,14 +225,19 @@ public enum GroupObject: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum GroupLinkStatus: String, Codable, Sendable {
+    /// I asked to join; the owner hasn't decided yet.
+    case requested
+    /// Member (or owner).
+    case active
+}
+
 /// My private record of a group membership (Private zone).
 public struct GroupLink: Codable, Hashable, Sendable, Identifiable {
     public var id: UUID
     public var zone: ZoneRef
     public var isOwner: Bool
-    public var shareURL: String?
-    /// Token I listen on for this group's pings.
-    public var myInbox: InboxToken
+    public var status: GroupLinkStatus
     public var notify: GroupNotifyLevel
     public var shareEvents: Bool
     public var shareLocations: Bool
@@ -216,18 +245,33 @@ public struct GroupLink: Codable, Hashable, Sendable, Identifiable {
     public var joinedAt: Date
     public var updatedAt: Date
 
-    public init(id: UUID, zone: ZoneRef, isOwner: Bool, shareURL: String? = nil, myInbox: InboxToken = TokenFactory.make(), notify: GroupNotifyLevel = .all, shareEvents: Bool = true, shareLocations: Bool = false, nameCache: String, joinedAt: Date = Date(), updatedAt: Date = Date()) {
+    public init(id: UUID, zone: ZoneRef, isOwner: Bool, status: GroupLinkStatus = .active, notify: GroupNotifyLevel = .all, shareEvents: Bool = true, shareLocations: Bool = false, nameCache: String, joinedAt: Date = Date(), updatedAt: Date = Date()) {
         self.id = id
         self.zone = zone
         self.isOwner = isOwner
-        self.shareURL = shareURL
-        self.myInbox = myInbox
+        self.status = status
         self.notify = notify
         self.shareEvents = shareEvents
         self.shareLocations = shareLocations
         self.nameCache = nameCache
         self.joinedAt = joinedAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, zone, isOwner, status, notify, shareEvents, shareLocations, nameCache, joinedAt, updatedAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        zone = try c.decode(ZoneRef.self, forKey: .zone)
+        isOwner = (try? c.decode(Bool.self, forKey: .isOwner)) ?? false
+        status = (try? c.decode(GroupLinkStatus.self, forKey: .status)) ?? .active
+        notify = (try? c.decode(GroupNotifyLevel.self, forKey: .notify)) ?? .all
+        shareEvents = (try? c.decode(Bool.self, forKey: .shareEvents)) ?? true
+        shareLocations = (try? c.decode(Bool.self, forKey: .shareLocations)) ?? false
+        nameCache = (try? c.decode(String.self, forKey: .nameCache)) ?? ""
+        joinedAt = (try? c.decode(Date.self, forKey: .joinedAt)) ?? Date()
+        updatedAt = (try? c.decode(Date.self, forKey: .updatedAt)) ?? joinedAt
     }
 }
 
@@ -237,41 +281,85 @@ public struct GroupInfo: Codable, Hashable, Sendable {
     public var object: GroupObject
     public var color: IdentityColor
     public var createdBy: UserID
-    /// Base64url AES key for group ping payloads. Only members can read it.
-    public var key: String
+    /// Share this code (QR / link) to let people *ask* to join; the owner approves each one.
+    public var inviteCode: String
     public var createdAt: Date
     public var updatedAt: Date
 
-    public init(id: UUID, name: String, object: GroupObject, color: IdentityColor, createdBy: UserID, key: String = TokenFactory.makeKeyData().base64URLEncodedString(), createdAt: Date = Date(), updatedAt: Date = Date()) {
+    public init(id: UUID, name: String, object: GroupObject, color: IdentityColor, createdBy: UserID, inviteCode: String = TokenFactory.make(), createdAt: Date = Date(), updatedAt: Date = Date()) {
         self.id = id
         self.name = name
         self.object = object
         self.color = color
         self.createdBy = createdBy
-        self.key = key
+        self.inviteCode = inviteCode
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, object, color, createdBy, inviteCode, createdAt, updatedAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        object = (try? c.decode(GroupObject.self, forKey: .object)) ?? .toilet
+        color = (try? c.decode(IdentityColor.self, forKey: .color)) ?? .violet
+        createdBy = (try? c.decode(UserID.self, forKey: .createdBy)) ?? ""
+        inviteCode = (try? c.decode(String.self, forKey: .inviteCode)) ?? ""
+        createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
+        updatedAt = (try? c.decode(Date.self, forKey: .updatedAt)) ?? createdAt
     }
 }
 
 public enum GroupRole: String, Codable, Sendable { case owner, member }
 
-/// Each member writes (and owns) their own member record in the group zone.
+/// One row per member in the group space. The owner (through the server) creates it; the member keeps
+/// their own identity fresh in it.
 public struct GroupMember: Codable, Hashable, Sendable, Identifiable {
     public var person: PersonRef
-    public var inbox: InboxToken
     public var role: GroupRole
     public var joinedAt: Date
     public var updatedAt: Date
 
     public var id: UserID { person.id }
 
-    public init(person: PersonRef, inbox: InboxToken, role: GroupRole, joinedAt: Date = Date(), updatedAt: Date = Date()) {
+    public init(person: PersonRef, role: GroupRole, joinedAt: Date = Date(), updatedAt: Date = Date()) {
         self.person = person
-        self.inbox = inbox
         self.role = role
         self.joinedAt = joinedAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case person, role, joinedAt, updatedAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        person = try c.decode(PersonRef.self, forKey: .person)
+        role = (try? c.decode(GroupRole.self, forKey: .role)) ?? .member
+        joinedAt = (try? c.decode(Date.self, forKey: .joinedAt)) ?? Date()
+        updatedAt = (try? c.decode(Date.self, forKey: .updatedAt)) ?? joinedAt
+    }
+}
+
+/// Someone asked to join a group I own (server-created when they open the link).
+public struct GroupJoinRequest: Codable, Hashable, Sendable, Identifiable {
+    public var person: PersonRef
+    public var createdAt: Date
+
+    public var id: UserID { person.id }
+
+    public init(person: PersonRef, createdAt: Date = Date()) {
+        self.person = person
+        self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case person, createdAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        person = try c.decode(PersonRef.self, forKey: .person)
+        createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
     }
 }
 
@@ -285,9 +373,13 @@ public struct GroupEvent: Codable, Hashable, Sendable, Identifiable, PoopLike {
     public var location: PoopLocation?
     public var pwmSessionID: UUID?
     public var partyID: UUID?
+    /// Mirrors of the owner's flags, so the group can apply the same counting rule
+    /// (`countsForRanking`) to its leaderboard, trophies and highlights.
+    public var manuallyAdjusted: Bool
+    public var imported: Bool
     public var updatedAt: Date
 
-    public init(id: UUID, ownerID: UserID, source: PoopSource, startedAt: Date, endedAt: Date?, location: PoopLocation?, pwmSessionID: UUID?, partyID: UUID?, updatedAt: Date = Date()) {
+    public init(id: UUID, ownerID: UserID, source: PoopSource, startedAt: Date, endedAt: Date?, location: PoopLocation?, pwmSessionID: UUID?, partyID: UUID?, manuallyAdjusted: Bool = false, imported: Bool = false, updatedAt: Date = Date()) {
         self.id = id
         self.ownerID = ownerID
         self.source = source
@@ -296,11 +388,33 @@ public struct GroupEvent: Codable, Hashable, Sendable, Identifiable, PoopLike {
         self.location = location
         self.pwmSessionID = pwmSessionID
         self.partyID = partyID
+        self.manuallyAdjusted = manuallyAdjusted
+        self.imported = imported
         self.updatedAt = updatedAt
     }
 
     public init(event: PoopEvent, ownerID: UserID, includeLocation: Bool) {
-        self.init(id: event.id, ownerID: ownerID, source: event.source, startedAt: event.startedAt, endedAt: event.endedAt, location: includeLocation ? event.location : nil, pwmSessionID: event.pwmSessionID, partyID: event.partyID, updatedAt: event.updatedAt)
+        self.init(id: event.id, ownerID: ownerID, source: event.source, startedAt: event.startedAt, endedAt: event.endedAt, location: includeLocation ? event.location : nil, pwmSessionID: event.pwmSessionID, partyID: event.partyID, manuallyAdjusted: event.manuallyAdjusted, imported: event.imported, updatedAt: event.updatedAt)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, ownerID, source, startedAt, endedAt, location, pwmSessionID, partyID, manuallyAdjusted, imported, updatedAt
+    }
+
+    /// Group copies written by older app versions carry no flags.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        ownerID = try c.decode(UserID.self, forKey: .ownerID)
+        source = try c.decode(PoopSource.self, forKey: .source)
+        startedAt = try c.decode(Date.self, forKey: .startedAt)
+        endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
+        location = try c.decodeIfPresent(PoopLocation.self, forKey: .location)
+        pwmSessionID = try c.decodeIfPresent(UUID.self, forKey: .pwmSessionID)
+        partyID = try c.decodeIfPresent(UUID.self, forKey: .partyID)
+        manuallyAdjusted = (try? c.decodeIfPresent(Bool.self, forKey: .manuallyAdjusted)) ?? false
+        imported = (try? c.decodeIfPresent(Bool.self, forKey: .imported)) ?? false
+        updatedAt = (try? c.decodeIfPresent(Date.self, forKey: .updatedAt)) ?? startedAt
     }
 
     public var isLive: Bool { source == .timed && endedAt == nil }

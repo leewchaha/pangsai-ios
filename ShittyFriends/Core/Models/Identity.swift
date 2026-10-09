@@ -1,17 +1,14 @@
 import Foundation
 
-/// CloudKit user record name of a person (stable per iCloud account, per container).
-/// Before iCloud is available the local user is identified by `UserID.localMe`.
+/// Firebase Auth user id of a person (stable per account, whichever sign-in provider was used).
+/// Before anyone is signed in the local user is identified by `UserID.localMe`.
 public typealias UserID = String
 
 public extension UserID {
     static let localMe: UserID = "__me__"
 }
 
-/// Random opaque token used to address pings in the public database.
-/// Never derived from identity; safe to rotate.
-public typealias InboxToken = String
-
+/// Random opaque tokens (invite tokens, group join codes). Never derived from identity; safe to rotate.
 public enum TokenFactory {
     /// 22-char URL-safe random token (~128 bits).
     public static func make() -> String {

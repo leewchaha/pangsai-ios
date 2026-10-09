@@ -1,7 +1,7 @@
 import Foundation
 
 /// User-owned export. Contains the user's own data and what they can see of their social graph.
-/// Never contains secrets (pair keys, invite secrets, inbox tokens).
+/// Never contains secrets (invite tokens, join codes, sign-in details).
 public enum ExportBuilder {
     public static let folder = "ShittyFriends Export"
     public static let version = 1
@@ -257,6 +257,8 @@ public extension Store {
         for var e in events where my.events[e.id] == nil {
             e.halfPoints = 0
             e.taps = 0
+            // The file is user-editable: imported poops are history, never leaderboard material.
+            e.imported = true
             if e.isLive { e.endedAt = e.startedAt }
             put(e)
             // Not mirrored to groups: groups only see poops logged after joining (friends see all history).

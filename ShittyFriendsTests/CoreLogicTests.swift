@@ -29,7 +29,7 @@ final class CoreLogicTests: XCTestCase {
     // MARK: Deep links
 
     func testFriendInviteRoundTrip() {
-        let p = FriendInvitePayload(handle: "lee", color: .lime, avatar: AvatarSpec(shape: .blob, tone: 3, eyes: .wink, mouth: .grin, accessory: .crown), token: "tok", secret: "sec")
+        let p = FriendInvitePayload(handle: "lee", color: .lime, avatar: AvatarSpec(shape: .blob, tone: 3, eyes: .wink, mouth: .grin, accessory: .crown), token: "tok", userID: "_lee")
         let url = DeepLinkCodec.friendURL(p)
         XCTAssertEqual(url.scheme, "shittyfriends")
         guard case .friendInvite(let back)? = DeepLinkCodec.parse(url) else { return XCTFail() }
@@ -40,14 +40,22 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(found, p)
     }
 
-    func testGroupInviteAndCloudShare() {
-        let p = GroupInvitePayload(name: "The Boys", object: .crown, color: .violet, shareURL: "https://www.icloud.com/share/0abcDEF#The_Boys")
+    func testGroupInviteRoundTrip() {
+        let p = GroupInvitePayload(name: "The Boys", object: .crown, color: .violet, code: "abcDEF123")
         guard case .groupInvite(let back)? = DeepLinkCodec.parse(DeepLinkCodec.groupURL(p)) else { return XCTFail() }
         XCTAssertEqual(back.n, "The Boys")
         XCTAssertEqual(back.object, .crown)
-        let share = URL(string: "https://www.icloud.com/share/0abcDEF")!
-        XCTAssertEqual(DeepLinkCodec.parse(share), .cloudShare(share))
+        XCTAssertEqual(back.k, "abcDEF123")
         XCTAssertNil(DeepLinkCodec.parse(URL(string: "https://example.com/x")!))
+        XCTAssertNil(DeepLinkCodec.parse(URL(string: "https://www.icloud.com/share/0abcDEF")!), "old iCloud share links are not invites any more")
+    }
+
+    func testOldFriendInviteLinksStillParse() throws {
+        // v1 links (CloudKit era) carry no inviter id; the token resolves it on the server.
+        let old = Data(#"{"v":1,"h":"lee","c":"lime","a":"round.0.dots.smile.none","t":"tok","k":"secret"}"#.utf8).base64URLEncodedString()
+        guard case .friendInvite(let p)? = DeepLinkCodec.parse(URL(string: "shittyfriends://friend?d=\(old)")!) else { return XCTFail() }
+        XCTAssertEqual(p.h, "lee")
+        XCTAssertNil(p.u)
     }
 
     // MARK: Handles
@@ -138,7 +146,7 @@ final class CoreLogicTests: XCTestCase {
             events.append(PoopEvent(source: .instant, startedAt: TestClock.date("2026-10-0\(d + 1)T08:1\(d % 3):00+09:00")))
         }
         events.append(PoopEvent(source: .instant, startedAt: TestClock.date("2026-10-10T02:00:00+09:00")))
-        let ctx = AchievementContext(events: events, friendCount: 0, completedSocialSessions: 0, pastYesParties: [], ownedCosmetics: 1, now: now, calendar: cal)
+        let ctx = AchievementContext(events: events, friendCount: 0, completedSocialSessions: 0, socialParties: 0, pastYesParties: [], ownedCosmetics: 1, now: now, calendar: cal)
         let ids = Set(AchievementEngine.newlyUnlocked(ctx, already: []).map { $0.id })
         XCTAssertTrue(ids.contains(.firstDrop))
         XCTAssertTrue(ids.contains(.sevenDay))
@@ -156,7 +164,7 @@ final class CoreLogicTests: XCTestCase {
         let cal = TestEnv.calendar
         let base = TestClock.date("2026-10-06T10:00:00+09:00")
         let events = (0..<20).map { PoopEvent(source: .instant, startedAt: base.addingTimeInterval(Double($0) * 600)) }
-        let ctx = AchievementContext(events: events, friendCount: 0, completedSocialSessions: 0, pastYesParties: [], ownedCosmetics: 1, now: base.addingTimeInterval(86400), calendar: cal)
+        let ctx = AchievementContext(events: events, friendCount: 0, completedSocialSessions: 0, socialParties: 0, pastYesParties: [], ownedCosmetics: 1, now: base.addingTimeInterval(86400), calendar: cal)
         let ids = Set(AchievementEngine.newlyUnlocked(ctx, already: []).map { $0.id })
         XCTAssertEqual(ids, [.firstDrop])
     }
@@ -188,39 +196,36 @@ final class CoreLogicTests: XCTestCase {
     // MARK: Notifications
 
     func testNotificationTextPrivacy() {
-        let friend = PingDirectory.Entry(kind: .friend, title: "lee")
-        let t = NotificationTextBuilder.text(kind: .poopStart, entry: friend, senderToken: nil, payload: nil, privateMode: false, quiet: false)
+        let t = NotificationTextBuilder.text(kind: .poopStart, sender: "lee", groupName: nil, privateMode: false, quiet: false)
         XCTAssertEqual(t.title, "💩 @lee is pooping")
-        let p = NotificationTextBuilder.text(kind: .poopStart, entry: friend, senderToken: nil, payload: nil, privateMode: true, quiet: true)
+        let p = NotificationTextBuilder.text(kind: .poopStart, sender: "lee", groupName: nil, privateMode: true, quiet: true)
         XCTAssertEqual(p.title, "ShittyFriends")
         XCTAssertEqual(p.body, "@lee checked in")
         XCTAssertTrue(p.silent)
-        let group = PingDirectory.Entry(kind: .group, title: "The Boys", members: ["s1": "@josh"])
-        let g = NotificationTextBuilder.text(kind: .pwmInvite, entry: group, senderToken: "s1", payload: nil, privateMode: false, quiet: false)
+        let g = NotificationTextBuilder.text(kind: .pwmInvite, sender: "josh", groupName: "The Boys", privateMode: false, quiet: false)
         XCTAssertEqual(g.title, "💩 @josh wants to poop with you")
+        XCTAssertEqual(g.body, "JOIN · The Boys")
         XCTAssertEqual(g.category, NotificationCategory.pwmInvite)
-        let unknown = NotificationTextBuilder.text(kind: .poopInstant, entry: nil, senderToken: nil, payload: nil, privateMode: false, quiet: false)
+        let unknown = NotificationTextBuilder.text(kind: .poopInstant, sender: nil, groupName: nil, privateMode: false, quiet: false)
         XCTAssertEqual(unknown.title, "💩 A shitty friend just pooped")
-    }
-
-    func testPayloadSealing() throws {
-        let sealer = FakeSealer()
-        let key = TokenFactory.makeKeyData().base64URLEncodedString()
-        let payload = PingPayload(uid: "_abc", handle: "lee", inbox: "in", pairKey: "pk", shareURL: "https://www.icloud.com/share/x", at: Date(timeIntervalSince1970: 1000))
-        let sealed = try sealer.seal(payload, keyBase64URL: key)
-        XCTAssertEqual(try sealer.openPayload(sealed, keyBase64URL: key), payload)
+        let party = NotificationTextBuilder.text(kind: .partyInvite, sender: "sam", groupName: "Dorm", partyTitle: "Friday Flush", privateMode: false, quiet: false)
+        XCTAssertEqual(party.body, "Friday Flush · Dorm")
+        let request = NotificationTextBuilder.text(kind: .groupJoinRequest, sender: "sam", groupName: "Dorm", privateMode: true, quiet: false)
+        XCTAssertEqual(request.title, "ShittyFriends")
+        XCTAssertFalse(request.body.contains("Dorm"), "private mode names no group")
     }
 
     func testDirectoryRoundTrip() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var d = PingDirectory()
-        d.entries["tok"] = PingDirectory.Entry(kind: .friend, title: "sam", key: "k")
-        d.lockScreenPrivate = true
+        var settings = AppSettings()
+        settings.lockScreenPrivate = true
+        settings.quietHoursEnabled = true
+        let d = PingDirectory(settings: settings)
         try d.write(to: dir)
         let back = PingDirectory.read(from: dir)
-        XCTAssertEqual(back?.entries["tok"]?.title, "sam")
         XCTAssertEqual(back?.lockScreenPrivate, true)
+        XCTAssertEqual(back?.isQuiet(minutesFromMidnight: 3 * 60), true)
     }
 
     // MARK: Map

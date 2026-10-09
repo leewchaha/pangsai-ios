@@ -19,7 +19,8 @@ APP_ID = "com.sakara.shittyfriends"
 EXTENSION_ID = APP_ID + ".NotificationService"
 LIVE_ACTIVITY_ID = APP_ID + ".PoopingLiveActivity"
 APP_GROUP = "group.com.sakara.shittyfriends"
-ICLOUD_CONTAINER = "iCloud.com.sakara.shittyfriends"
+# Sign in with Apple is requested by the app target (Firebase Auth); the provisioning profile must carry it.
+APPLE_SIGN_IN_ENTITLEMENT = "com.apple.developer.applesignin"
 TARGET_IDS = {"ShittyFriends": APP_ID, "NotificationService": EXTENSION_ID, "PoopingLiveActivity": LIVE_ACTIVITY_ID}
 PROFILE_SUFFIXES = {".mobileprovision", ".provisionprofile"}
 
@@ -71,10 +72,10 @@ def entitlement_values(value):
     """Normalize entitlement allowlists from provisioning profiles.
 
     Apple provisioning profiles may encode some entitlement allowlists as an
-    array (for example ["CloudKit"]) or as the wildcard string "*". The
+    array (for example ["Default"]) or as the wildcard string "*". The
     latter means the profile allows all values for that entitlement. Treating
     "*" as a literal array item caused the old preflight to reject valid
-    iCloud/CloudKit App Store profiles.
+    App Store profiles.
     """
     if value is None:
         return []
@@ -108,10 +109,8 @@ def profile_problems(profile, target_id, expected_team=None):
     if not entitlement_allows(ent.get("com.apple.security.application-groups"), APP_GROUP):
         problems.append(f"App Groups entitlement missing {APP_GROUP}")
     if target_id == APP_ID:
-        if not entitlement_allows(ent.get("com.apple.developer.icloud-container-identifiers"), ICLOUD_CONTAINER):
-            problems.append("CloudKit iCloud container not provisioned")
-        if not entitlement_allows(ent.get("com.apple.developer.icloud-services"), "CloudKit"):
-            problems.append("CloudKit capability not provisioned")
+        if not entitlement_allows(ent.get(APPLE_SIGN_IN_ENTITLEMENT), "Default"):
+            problems.append("Sign in with Apple capability not provisioned")
         if ent.get("aps-environment") != "production":
             problems.append("production Push Notifications capability not provisioned")
     return problems
@@ -261,13 +260,13 @@ def main(argv=None):
         capability_problem = any(
             phrase in error
             for error in errors
-            for phrase in ("App Groups entitlement missing", "CloudKit iCloud container not provisioned",
-                           "CloudKit capability not provisioned", "Push Notifications capability not provisioned")
+            for phrase in ("App Groups entitlement missing", "Sign in with Apple capability not provisioned",
+                           "Push Notifications capability not provisioned")
         )
         if capability_problem:
             print("FIX: One of the installed profiles does not contain the entitlement requested by the target.", file=sys.stderr)
             print("     Check the specific error above, then regenerate/refetch only that profile if needed.", file=sys.stderr)
-            print("     Do not remove App Group/CloudKit entitlements merely to make signing pass.", file=sys.stderr)
+            print("     Do not remove App Group/Sign in with Apple entitlements merely to make signing pass.", file=sys.stderr)
 
         print("     See docs/APP_GROUPS_SIGNING_FIX.md for exact diagnostics.", file=sys.stderr)
         return 2

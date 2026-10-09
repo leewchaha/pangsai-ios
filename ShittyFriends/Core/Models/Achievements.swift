@@ -57,7 +57,7 @@ public enum AchievementID: String, Codable, CaseIterable, Sendable, Identifiable
         case .clockwork: return "Logged within the same hour on 5 different days in a week."
         case .firstFriend: return "Became shitty friends with someone."
         case .poopPals: return "Completed 10 Poop With Me sessions."
-        case .partyAnimal: return "Joined 3 Poop Parties."
+        case .partyAnimal: return "Joined 3 Poop Parties with at least one other person."
         case .perfectAttendance: return "Joined every party you said yes to (at least 3) in 30 days."
         case .traveller: return "Pooped in 5 different places."
         case .international: return "Logged in two countries."

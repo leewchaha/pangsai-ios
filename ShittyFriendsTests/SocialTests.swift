@@ -92,7 +92,7 @@ final class SocialTests: XCTestCase {
     func testFriendRequestDedupAndBlock() {
         let clock = TestClock()
         let (store, _) = TestEnv.store(clock: clock)
-        let req = IncomingFriendRequest(id: "p1", inviteToken: "t", person: sam, theirInbox: "in", pairKey: "k", receivedAt: clock.now)
+        let req = IncomingFriendRequest(id: "p1", inviteToken: "t", person: sam, receivedAt: clock.now)
         XCTAssertTrue(store.receiveFriendRequest(req))
         var req2 = req
         req2.id = "p2"
@@ -107,7 +107,7 @@ final class SocialTests: XCTestCase {
     func testFriendLinkLifecycleAndRemoteZoneGone() {
         let clock = TestClock()
         let (store, log) = TestEnv.store(clock: clock)
-        let link = FriendLink(userID: "_sam", person: sam, status: .active, myInbox: "mine", theirInbox: "theirs", pairKey: "k")
+        let link = FriendLink(userID: "_sam", person: sam, status: .active)
         store.upsertFriendLink(link)
         XCTAssertEqual(store.activeFriendLinks.count, 1)
         XCTAssertTrue(store.my.achievements[.firstFriend] != nil)
@@ -165,7 +165,16 @@ final class SocialTests: XCTestCase {
         let zone = ZoneRef(ownerName: "_josh", zoneName: ZoneNames.group(UUID()))
         let gid = ZoneNames.groupID(fromZoneName: zone.zoneName)!
         log.effects.removeAll()
-        store.registerJoinedGroup(zone: zone, groupID: gid, name: "Class", shareURL: nil)
+        store.registerGroupRequest(groupID: gid, ownerID: "_josh", name: "Class", object: .toilet, color: .violet)
+        XCTAssertEqual(store.my.groupLinks[gid]?.status, .requested)
+        XCTAssertTrue(store.groupSummaries.isEmpty, "not a member until the owner approves")
+        // While waiting, nothing of mine is mirrored.
+        store.logInstant()
+        XCTAssertNil(store.cache.zones[zone]?.events.values.first)
+        // The owner approved: my member row arrives (the server's joinedAt is after that poop).
+        clock.advance(1)
+        store.apply([.upsert(.member(GroupMember(person: store.meRef, role: .member, joinedAt: clock.now)), zone: zone)])
+        XCTAssertEqual(store.my.groupLinks[gid]?.status, .active)
         XCTAssertTrue(log.saves.filter { if case .groupEvent = $0 { return true } else { return false } }.isEmpty,
                       "group membership is not personal-history access: nothing before joining is mirrored")
         XCTAssertEqual(store.my.groupLinks[gid]?.notify, .pwmAndParties, "joining by link starts quiet: no alert per member poop")
@@ -174,7 +183,7 @@ final class SocialTests: XCTestCase {
         clock.advance(60)
         store.logInstant()
         XCTAssertEqual(store.cache.zones[zone]?.events.count, 2)
-        store.apply([.upsert(.member(GroupMember(person: josh, inbox: "jx", role: .owner, joinedAt: clock.now.addingTimeInterval(-999))), zone: zone)])
+        store.apply([.upsert(.member(GroupMember(person: josh, role: .owner, joinedAt: clock.now.addingTimeInterval(-999))), zone: zone)])
         let board = store.leaderboard(zone)
         XCTAssertEqual(board.first?.member.id, "_me")
         XCTAssertEqual(board.first?.count, 2)
@@ -186,7 +195,8 @@ final class SocialTests: XCTestCase {
         let (store, log) = TestEnv.store(clock: clock)
         let zone = ZoneRef(ownerName: "_josh", zoneName: ZoneNames.group(UUID()))
         let gid = ZoneNames.groupID(fromZoneName: zone.zoneName)!
-        store.registerJoinedGroup(zone: zone, groupID: gid, name: "Class", shareURL: nil)
+        store.registerGroupRequest(groupID: gid, ownerID: "_josh", name: "Class", object: .toilet, color: .violet)
+        store.apply([.upsert(.member(GroupMember(person: store.meRef, role: .member, joinedAt: clock.now)), zone: zone)])
         let e = store.logInstant()
         log.effects.removeAll()
         store.removeGroupLocal(gid)

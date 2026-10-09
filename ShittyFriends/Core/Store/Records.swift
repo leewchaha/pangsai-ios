@@ -1,6 +1,6 @@
 import Foundation
 
-/// Identifies one syncable record independently of CloudKit types.
+/// Identifies one syncable record independently of the backend.
 public enum RecordRef: Hashable, Sendable {
     // My "Me" zone (shared with friends)
     case profile
@@ -16,6 +16,7 @@ public enum RecordRef: Hashable, Sendable {
     // Group zones / session zones
     case groupInfo(ZoneRef)
     case member(ZoneRef, UserID)
+    case joinRequest(ZoneRef, UserID)
     case groupEvent(ZoneRef, UUID)
     case pwmSession(ZoneRef, UUID)
     case participant(ZoneRef, UUID, UserID)
@@ -27,7 +28,7 @@ public enum RecordRef: Hashable, Sendable {
         switch self {
         case .profile, .event, .achievement, .cosmetic: return .me
         case .settings, .friendLink, .groupLink, .invite, .spaceLink: return .privateZone
-        case .groupInfo(let z), .member(let z, _), .groupEvent(let z, _), .pwmSession(let z, _),
+        case .groupInfo(let z), .member(let z, _), .joinRequest(let z, _), .groupEvent(let z, _), .pwmSession(let z, _),
              .participant(let z, _, _), .reaction(let z, _), .party(let z, _), .rsvp(let z, _, _):
             return z
         }
@@ -46,6 +47,7 @@ public enum RecordRef: Hashable, Sendable {
         case .spaceLink: return RecordTypes.spaceLink
         case .groupInfo: return RecordTypes.groupInfo
         case .member: return RecordTypes.member
+        case .joinRequest: return RecordTypes.joinRequest
         case .groupEvent: return RecordTypes.groupEvent
         case .pwmSession: return RecordTypes.pwmSession
         case .participant: return RecordTypes.participant
@@ -55,7 +57,7 @@ public enum RecordRef: Hashable, Sendable {
         }
     }
 
-    /// CloudKit record name. Stable and parseable (see `RecordRef.parse`).
+    /// Stable, parseable record name (see `RecordRef.parse`). Also the local persistence key.
     public var recordName: String {
         switch self {
         case .profile: return "profile"
@@ -69,6 +71,7 @@ public enum RecordRef: Hashable, Sendable {
         case .spaceLink(let z): return "SL-" + Data("\(z.ownerName)/\(z.zoneName)".utf8).base64URLEncodedString()
         case .groupInfo: return "info"
         case .member(_, let uid): return "M-" + uid
+        case .joinRequest(_, let uid): return "JR-" + uid
         case .groupEvent(_, let id): return "GE-" + id.uuidString
         case .pwmSession(_, let id): return "PS-" + id.uuidString
         case .participant(_, let sid, let uid): return "PP-" + sid.uuidString + "-" + uid
@@ -113,6 +116,7 @@ public enum RecordRef: Hashable, Sendable {
         }
         if name == "info" { return .groupInfo(zone) }
         if name.hasPrefix("M-") { return .member(zone, String(name.dropFirst(2))) }
+        if name.hasPrefix("JR-") { return .joinRequest(zone, String(name.dropFirst(3))) }
         if let id = uuid(after: "GE-") { return .groupEvent(zone, id) }
         if let id = uuid(after: "PS-") { return .pwmSession(zone, id) }
         if let sid = uuid(after: "PP-"), let uid = tail(after: "PP-") { return .participant(zone, sid, uid) }
@@ -135,18 +139,16 @@ public enum RecordTypes {
     public static let spaceLink = "SpaceLink"
     public static let groupInfo = "GroupInfo"
     public static let member = "Member"
+    public static let joinRequest = "JoinRequest"
     public static let groupEvent = "GroupEvent"
     public static let pwmSession = "PWMSession"
     public static let participant = "PWMParticipant"
     public static let reaction = "Reaction"
     public static let party = "Party"
     public static let rsvp = "RSVP"
-    /// Root record of a friend-invite share (Invites zone). Field `payload` = base64url JSON FriendInvitePayload.
-    public static let inviteCard = "InviteCard"
-    public static let inviteCardPayloadKey = "payload"
 }
 
-/// A decoded record coming from CloudKit (any database).
+/// A decoded record coming from the backend.
 public enum RemoteRecord: Hashable, Sendable {
     case profile(UserProfile)
     case event(PoopEvent)
@@ -159,6 +161,7 @@ public enum RemoteRecord: Hashable, Sendable {
     case spaceLink(SpaceLink)
     case groupInfo(GroupInfo)
     case member(GroupMember)
+    case joinRequest(GroupJoinRequest)
     case groupEvent(GroupEvent)
     case pwmSession(PWMSession)
     case participant(PWMParticipant)
@@ -169,11 +172,13 @@ public enum RemoteRecord: Hashable, Sendable {
 
 public enum RemoteChange: Hashable, Sendable {
     case upsert(RemoteRecord, zone: ZoneRef)
-    /// Same as `upsert`, with the iCloud user who last wrote the record. Group/session records are
-    /// checked against who is allowed to write them (CloudKit share permissions are all-or-nothing).
+    /// Same as `upsert`, with the user who wrote the record. Group/session records are checked against
+    /// who is allowed to write them (belt and braces: the server rules enforce the same authorship).
     case upsertFrom(RemoteRecord, zone: ZoneRef, writer: UserID)
     /// `ref` was parsed in `zone` (needed because "Me" refs don't encode the owner).
     case delete(RecordRef, zone: ZoneRef)
+    /// The whole zone is gone for me: a friend unfriended me, a group was deleted or I was removed,
+    /// a space expired.
     case zoneDeleted(ZoneRef)
 }
 
@@ -181,6 +186,9 @@ public enum RemoteChange: Hashable, Sendable {
 
 public enum HapticKind: Sendable, Hashable { case logHeavy, tapLight, tapCritical, success, warning, reaction }
 
+/// Alerts the store wants other people to get. With the Firebase backend, Poop With Me and party
+/// invites/joins are pushed by the server when their records land, so only `.poop` needs the app
+/// to do anything (announce the event after the Undo window).
 public enum PingIntent: Hashable, Sendable {
     /// Notify friends + groups that I started / logged a poop.
     case poop(eventID: UUID, kind: PingKind)
@@ -194,20 +202,23 @@ public enum Effect: Hashable, Sendable {
     case save(RecordRef)
     case delete(RecordRef)
     case ping(PingIntent)
+    /// Withdraw anything still pending about an event (an unsent "is pooping" announcement).
     case cancelPings(eventID: UUID)
     case scheduleLongSessionReminder(eventID: UUID, at: Date)
     case cancelLongSessionReminder(eventID: UUID)
     case scheduleParty(zone: ZoneRef, partyID: UUID)
     case cancelParty(partyID: UUID)
     case requestLocation(eventID: UUID)
+    /// Friend / group / invite set changed: the platform re-attaches its listeners.
     case refreshSubscriptions
+    /// Settings that the Notification Service Extension reads changed (private lock screen, quiet hours).
     case refreshDirectory
     case rescheduleSummaries
     case achievementsUnlocked([AchievementID])
     case cosmeticUnlocked(CosmeticID)
-    /// A friend's shared zone disappeared (they removed me). Revoke my side too.
+    /// A friendship ended on my side (unfriend / block): tell the server.
     case friendZoneGone(UserID)
-    /// A group/session zone needs to exist in my private DB before records are saved into it.
+    /// A group/session space I own must exist on the server before records are saved into it.
     case ensureZone(ZoneRef)
     case haptic(HapticKind)
 }

@@ -18,6 +18,8 @@ public struct MyState: Codable, Hashable, Sendable {
     public var requests: [String: IncomingFriendRequest]
     /// Device-local: PWM sessions confirmed to have had 2+ people pooping (achievement progress).
     public var confirmedSocialSessions: Set<UUID>
+    /// Device-local: parties I joined that somebody else also joined (a solo "party" earns nothing).
+    public var confirmedSocialParties: Set<UUID>
     /// Device-local: archive of finished PWM sessions for export (session zones get cleaned up).
     public var pwmArchive: [UUID: PWMArchiveEntry]
 
@@ -36,11 +38,12 @@ public struct MyState: Codable, Hashable, Sendable {
         spaceLinks = [:]
         requests = [:]
         confirmedSocialSessions = []
+        confirmedSocialParties = []
         pwmArchive = [:]
     }
 
     enum CodingKeys: String, CodingKey {
-        case userID, onboarded, ageConfirmed, profile, events, achievements, cosmetics, settings, friendLinks, groupLinks, invites, spaceLinks, requests, confirmedSocialSessions, pwmArchive
+        case userID, onboarded, ageConfirmed, profile, events, achievements, cosmetics, settings, friendLinks, groupLinks, invites, spaceLinks, requests, confirmedSocialSessions, confirmedSocialParties, pwmArchive
     }
 
     /// Tolerant decoding: unknown/missing fields fall back to defaults so app updates never wipe local data.
@@ -61,6 +64,7 @@ public struct MyState: Codable, Hashable, Sendable {
         spaceLinks = (try? c.decodeIfPresent([ZoneRef: SpaceLink].self, forKey: .spaceLinks)) ?? d.spaceLinks
         requests = (try? c.decodeIfPresent([String: IncomingFriendRequest].self, forKey: .requests)) ?? d.requests
         confirmedSocialSessions = (try? c.decodeIfPresent(Set<UUID>.self, forKey: .confirmedSocialSessions)) ?? d.confirmedSocialSessions
+        confirmedSocialParties = (try? c.decodeIfPresent(Set<UUID>.self, forKey: .confirmedSocialParties)) ?? d.confirmedSocialParties
         pwmArchive = (try? c.decodeIfPresent([UUID: PWMArchiveEntry].self, forKey: .pwmArchive)) ?? d.pwmArchive
     }
 }
@@ -82,7 +86,7 @@ public struct PWMArchiveEntry: Codable, Hashable, Sendable {
     }
 }
 
-/// Read caches of other people's data. Safe to drop: it re-syncs from CloudKit.
+/// Read caches of other people's data. Safe to drop: it re-syncs from the server.
 public struct CacheState: Codable, Hashable, Sendable {
     public var friends: [UserID: FriendCache]
     public var zones: [ZoneRef: ZoneCache]

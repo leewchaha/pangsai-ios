@@ -216,6 +216,7 @@ public extension Store {
         let updated = r
         mutateCache { $0.zones[zone]?.rsvps[partyID, default: [:]][uid] = updated }
         emit([.save(.rsvp(zone, partyID, uid))])
+        confirmSocialParty(zone: zone, partyID: partyID)
         evaluateAchievements()
         return event
     }
@@ -238,7 +239,53 @@ public extension Store {
         let updated = r
         mutateCache { $0.zones[zone]?.rsvps[partyID, default: [:]][uid] = updated }
         emit([.save(.event(e.id)), .save(.rsvp(zone, partyID, uid))] + mirrorEffects(for: e))
+        confirmSocialParty(zone: zone, partyID: partyID)
         evaluateAchievements()
+    }
+
+    /// Remembers that a party I joined was joined by somebody else too (the only kind that counts for
+    /// Party Animal / Perfect Attendance). Device-local, like `confirmedSocialSessions`, because
+    /// ad-hoc party spaces get cleaned up a day after the party.
+    internal func confirmSocialParty(zone: ZoneRef, partyID: UUID) {
+        guard let uid = my.userID, let rsvps = cache.zones[zone]?.rsvps[partyID] else { return }
+        guard rsvps[uid]?.joinedAt != nil, rsvps.values.contains(where: { $0.id != uid && $0.joinedAt != nil }),
+              !my.confirmedSocialParties.contains(partyID) else { return }
+        mutateMy { $0.confirmedSocialParties.insert(partyID) }
+    }
+
+    /// A JOIN from a notification counted the poop before the session had synced; the session turned
+    /// out to be over. The poop stays, the dead session reference goes.
+    func detachFromPWM(eventID: UUID) {
+        guard var e = my.events[eventID], e.pwmSessionID != nil else { return }
+        e.pwmSessionID = nil
+        e.updatedAt = clock()
+        put(e)
+        emit([.save(.event(e.id))] + mirrorEffects(for: e))
+    }
+
+    /// Same for a party that was over or cancelled by the time it synced.
+    func detachFromParty(eventID: UUID) {
+        guard var e = my.events[eventID], e.partyID != nil else { return }
+        e.partyID = nil
+        e.updatedAt = clock()
+        put(e)
+        emit([.save(.event(e.id))] + mirrorEffects(for: e))
+    }
+
+    /// Whether a party can still be joined by me right now (used before a JOIN from a notification
+    /// or a card is honoured): scheduled, inside its join window, and not already joined.
+    func canJoinParty(_ partyID: UUID, now: Date? = nil) -> Bool {
+        guard let view = party(partyID) else { return false }
+        let n = now ?? clock()
+        guard view.party.isJoinable(now: n) else { return false }
+        return myRSVP(view)?.joinedAt == nil
+    }
+
+    /// Whether a Poop With Me session can still be joined: open, and I'm not already in it.
+    /// Someone who already finished (or declined) may join again: JOIN means "I'm pooping now".
+    func canJoinPWM(_ sessionID: UUID, now: Date? = nil) -> Bool {
+        guard let uid = my.userID, let view = liveSession(sessionID, now: now) else { return false }
+        return view.participants.first(where: { $0.id == uid })?.status != .joined
     }
 
     func cancelParty(zone: ZoneRef, partyID: UUID) {

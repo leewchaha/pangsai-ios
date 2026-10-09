@@ -6,20 +6,21 @@ import os
 private let log = Logger(subsystem: "com.sakara.shittyfriends", category: "notifications")
 
 /// Local notifications (reminders, party alerts, reports) and notification categories.
-/// Remote "friend is pooping" alerts come from CloudKit subscriptions and are rewritten on-device
-/// by the Notification Service Extension.
+/// Remote alerts ("friend is pooping", invites, requests) are sent by the Cloud Functions through
+/// Firebase Cloud Messaging and finished on-device by the Notification Service Extension.
 @MainActor
 final class NotificationManager {
     let center = UNUserNotificationCenter.current()
     private(set) var authorization: UNAuthorizationStatus = .notDetermined
 
-    // userInfo keys shared with the Notification Service Extension.
+    // userInfo keys of local notifications (the server's pushes use `PushField`, same spelling for
+    // kind / session / party so one handler serves both).
     enum Key {
-        static let kind = "sf_kind"
-        static let session = "sf_session"
-        static let group = "sf_group"
-        static let share = "sf_share"
-        static let party = "sf_party"
+        static let kind = PushField.kind
+        static let session = PushField.session
+        /// Local group highlights alerts only: the group id.
+        static let group = "sf_group_local_id"
+        static let party = PushField.party
         static let event = "sf_event"
     }
 
@@ -33,6 +34,7 @@ final class NotificationManager {
             UNNotificationCategory(identifier: NotificationCategory.partyInvite, actions: [view], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: NotificationCategory.partyStart, actions: [join, view], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: NotificationCategory.friendRequest, actions: [view], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: NotificationCategory.groupRequest, actions: [view], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: NotificationCategory.longSession, actions: [done], intentIdentifiers: [], options: [])
         ]
         center.setNotificationCategories(categories)

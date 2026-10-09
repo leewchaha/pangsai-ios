@@ -131,35 +131,50 @@ public struct PartyRSVP: Codable, Hashable, Sendable, Identifiable {
 
 public enum SpaceKind: String, Codable, Sendable { case pwm, party }
 
-/// A private ad-hoc zone used for a Poop With Me session or a Party between friends
-/// who don't share a group. Owned by the creator, shared read-write with invitees only.
+/// An ad-hoc space used for a Poop With Me session or a Party between friends who don't share a
+/// group. Owned by the creator; its members are the friends they invited.
 public struct SpaceLink: Codable, Hashable, Sendable, Identifiable {
     public var zone: ZoneRef
     public var kind: SpaceKind
     public var isOwner: Bool
-    public var shareURL: String?
+    public var title: String
     public var participantIDs: [UserID]
     public var createdAt: Date
     public var expiresAt: Date
 
     public var id: ZoneRef { zone }
 
-    public init(zone: ZoneRef, kind: SpaceKind, isOwner: Bool, shareURL: String? = nil, participantIDs: [UserID] = [], createdAt: Date = Date(), expiresAt: Date) {
+    public init(zone: ZoneRef, kind: SpaceKind, isOwner: Bool, title: String = "", participantIDs: [UserID] = [], createdAt: Date = Date(), expiresAt: Date) {
         self.zone = zone
         self.kind = kind
         self.isOwner = isOwner
-        self.shareURL = shareURL
+        self.title = title
         self.participantIDs = participantIDs
         self.createdAt = createdAt
         self.expiresAt = expiresAt
     }
+
+    private enum CodingKeys: String, CodingKey { case zone, kind, isOwner, title, participantIDs, createdAt, expiresAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        zone = try c.decode(ZoneRef.self, forKey: .zone)
+        kind = (try? c.decode(SpaceKind.self, forKey: .kind)) ?? .pwm
+        isOwner = (try? c.decode(Bool.self, forKey: .isOwner)) ?? false
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        participantIDs = (try? c.decode([UserID].self, forKey: .participantIDs)) ?? []
+        createdAt = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
+        expiresAt = (try? c.decode(Date.self, forKey: .expiresAt)) ?? createdAt.addingTimeInterval(6 * 3600)
+    }
 }
 
-/// Local copy of any group zone or ad-hoc session zone.
+/// Local copy of any group space or ad-hoc session space.
 public struct ZoneCache: Codable, Hashable, Sendable {
     public var zone: ZoneRef
     public var group: GroupInfo?
     public var members: [UserID: GroupMember]
+    /// Owner only: people waiting for approval.
+    public var requests: [UserID: GroupJoinRequest]
     public var events: [UUID: GroupEvent]
     public var sessions: [UUID: PWMSession]
     /// Keyed by session id, then user id.
@@ -173,11 +188,29 @@ public struct ZoneCache: Codable, Hashable, Sendable {
         self.zone = zone
         self.group = nil
         self.members = [:]
+        self.requests = [:]
         self.events = [:]
         self.sessions = [:]
         self.participants = [:]
         self.reactions = [:]
         self.parties = [:]
         self.rsvps = [:]
+    }
+
+    private enum CodingKeys: String, CodingKey { case zone, group, members, requests, events, sessions, participants, reactions, parties, rsvps }
+
+    /// The cache is disposable (it re-syncs), but a missing field must not throw the whole file away.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        zone = try c.decode(ZoneRef.self, forKey: .zone)
+        group = try? c.decodeIfPresent(GroupInfo.self, forKey: .group)
+        members = (try? c.decode([UserID: GroupMember].self, forKey: .members)) ?? [:]
+        requests = (try? c.decode([UserID: GroupJoinRequest].self, forKey: .requests)) ?? [:]
+        events = (try? c.decode([UUID: GroupEvent].self, forKey: .events)) ?? [:]
+        sessions = (try? c.decode([UUID: PWMSession].self, forKey: .sessions)) ?? [:]
+        participants = (try? c.decode([UUID: [UserID: PWMParticipant]].self, forKey: .participants)) ?? [:]
+        reactions = (try? c.decode([UUID: Reaction].self, forKey: .reactions)) ?? [:]
+        parties = (try? c.decode([UUID: Party].self, forKey: .parties)) ?? [:]
+        rsvps = (try? c.decode([UUID: [UserID: PartyRSVP]].self, forKey: .rsvps)) ?? [:]
     }
 }

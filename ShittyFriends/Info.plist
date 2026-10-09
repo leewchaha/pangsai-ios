@@ -30,10 +30,18 @@
 				<string>shittyfriends</string>
 			</array>
 		</dict>
+		<!-- Google sign-in redirect. Codemagic replaces the placeholder with the REVERSED_CLIENT_ID
+		     from GoogleService-Info.plist; locally, paste it here (docs/SETUP.md §3). Harmless if unused. -->
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>google-sign-in</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>REVERSED_CLIENT_ID_PLACEHOLDER</string>
+			</array>
+		</dict>
 	</array>
 	<key>NSSupportsLiveActivities</key>
-	<true/>
-	<key>CKSharingSupported</key>
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>

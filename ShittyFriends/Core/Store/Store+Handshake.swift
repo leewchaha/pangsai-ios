@@ -1,12 +1,13 @@
 import Foundation
 
-/// Three-step friend handshake over the anonymous ping channel. CloudKit share operations happen in
-/// the platform layer between these steps; the store only records state.
+/// Friend handshake on top of the server's `friendRequests` / `friendships` records. The platform
+/// layer writes the records; the store only records state and reacts to what comes back.
 ///
-///   B scans A's invite      -> `beginFriendRequest`      -> ping friendRequest (to A's invite token)
-///   A taps ACCEPT           -> `acceptFriendRequest`     -> platform shares A's history with B, ping friendAccept
-///   B gets friendAccept     -> platform accepts A's share + shares B's history -> `completeAsRequester`, ping friendComplete
-///   A gets friendComplete   -> platform accepts B's share -> `completeAsAccepter`
+///   B opens A's invite       -> `beginFriendRequest`     -> platform creates friendRequests/{id}
+///   A sees the request       -> `receiveFriendRequest`
+///   A taps ACCEPT            -> `acceptFriendRequest`    -> platform creates friendships/{pair}
+///   both see the friendship  -> `friendshipConfirmed`    -> link active, histories visible
+///   either unfriends/blocks  -> platform deletes the friendship -> `friendshipEnded` on the other side
 public extension Store {
     enum HandshakeError: Error, Equatable {
         case notSignedIn
@@ -17,17 +18,27 @@ public extension Store {
         case unknownLink
     }
 
-    /// B side. Creates (or reuses) a pending link for this invite and returns the request ping to send.
-    func beginFriendRequest(_ invite: FriendInvitePayload) throws -> (link: FriendLink, ping: OutgoingPing) {
-        guard userID != nil else { throw HandshakeError.notSignedIn }
-        if my.invites[invite.t] != nil { throw HandshakeError.ownInvite }
-        let link = addRequestedLink(invite: invite, myInbox: TokenFactory.make(), pairKey: TokenFactory.makeKeyData().base64URLEncodedString())
-        let ping = PingPlanner.friendRequest(invite: invite, link: link, store: self, now: clock())
-        return (link, ping)
+    /// B side. Creates (or reuses) a pending link for this invite.
+    func beginFriendRequest(_ invite: FriendInvitePayload) throws -> FriendLink {
+        guard let me = userID else { throw HandshakeError.notSignedIn }
+        if my.invites[invite.t] != nil || invite.u == me { throw HandshakeError.ownInvite }
+        if let uid = invite.u {
+            if isBlocked(uid) { throw HandshakeError.blocked }
+            if let existing = friendLink(for: uid), existing.status == .active { throw HandshakeError.alreadyFriends }
+        }
+        return addRequestedLink(invite: invite)
     }
 
-    /// A side. Turns a request into a link that is waiting for their share. The platform then adds them
-    /// to my history share and sends `PingPlanner.friendAccept` with the share URL.
+    /// B side. The request record exists on the server now.
+    func markRequestSent(linkID: UUID, requestID: String, userID: UserID) {
+        guard var link = my.friendLinks[linkID] else { return }
+        link.requestID = requestID
+        link.userID = userID
+        if var p = link.person { p.id = userID; link.person = p }
+        upsertFriendLink(link)
+    }
+
+    /// A side. Turns a request into a link that waits for the friendship record.
     func acceptFriendRequest(_ requestID: String) throws -> FriendLink {
         guard userID != nil else { throw HandshakeError.notSignedIn }
         guard let req = my.requests[requestID] else { throw HandshakeError.unknownRequest }
@@ -41,34 +52,36 @@ public extension Store {
             throw HandshakeError.alreadyFriends
         }
         let now = clock()
-        // If I had already accepted them once (e.g. retry), keep the same tokens.
-        var link = friendLink(for: uid) ?? FriendLink(userID: uid, person: req.person, status: .awaitingTheirShare, myInbox: TokenFactory.make(), pairKey: req.pairKey, createdAt: now, updatedAt: now)
+        var link = friendLink(for: uid) ?? FriendLink(userID: uid, person: req.person, status: .awaitingTheirShare, createdAt: now, updatedAt: now)
         link.person = req.person
-        link.theirInbox = req.theirInbox
-        link.pairKey = req.pairKey
+        link.requestID = requestID
         link.status = .awaitingTheirShare
         upsertFriendLink(link)
         dismissRequest(requestID)
         return my.friendLinks[link.id] ?? link
     }
 
-    /// B side, after the platform accepted their share and shared my history with them.
-    func completeAsRequester(linkID: UUID, person: PersonRef, theirInbox: InboxToken, shareURL: String) throws {
-        guard var link = my.friendLinks[linkID] else { throw HandshakeError.unknownLink }
-        link.userID = person.id
-        link.person = person
-        link.theirInbox = theirInbox
-        link.theirShareURL = shareURL
+    /// Both sides: the friendship record arrived. Idempotent.
+    func friendshipConfirmed(with uid: UserID, person: PersonRef?) {
+        guard uid != userID, !isBlocked(uid) else { return }
+        let now = clock()
+        var link = friendLink(for: uid) ?? FriendLink(userID: uid, person: person, status: .active, createdAt: now, updatedAt: now)
+        if let person { link.person = person }
+        link.userID = uid
         link.status = .active
+        link.requestID = nil
+        link.inviteToken = nil
         upsertFriendLink(link)
+        mutateMy { m in for (k, v) in m.requests where v.person.id == uid { m.requests[k] = nil } }
     }
 
-    /// A side, after the platform accepted their share.
-    func completeAsAccepter(linkID: UUID, shareURL: String) throws {
-        guard var link = my.friendLinks[linkID] else { throw HandshakeError.unknownLink }
-        link.theirShareURL = shareURL
-        link.status = .active
-        upsertFriendLink(link)
+    /// The friendship record is gone (they unfriended or blocked me, or I did on another device).
+    func friendshipEnded(with uid: UserID) {
+        guard let link = friendLink(for: uid), link.status == .active else {
+            mutateCache { $0.friends[uid] = nil }
+            return
+        }
+        removeFriendLocal(link.id)
     }
 
     /// Cancel a request I sent (B side) or a pending acceptance (A side).

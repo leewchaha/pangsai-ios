@@ -1,12 +1,13 @@
 import Foundation
 
 public extension Store {
-    /// Me + my full friends (their whole history is visible to me).
+    /// Me + my full friends (their whole history is visible to me). Ranks people, so only
+    /// live-logged poops take part (`countsForRanking`).
     func friendHighlightParticipants() -> [HighlightParticipant] {
         var out: [HighlightParticipant] = []
-        out.append(HighlightParticipant(id: userID ?? UserID.localMe, handle: profile.handle, color: profile.color, events: my.events.values.map(HighlightEvent.init)))
+        out.append(HighlightParticipant(id: userID ?? UserID.localMe, handle: profile.handle, color: profile.color, events: my.events.values.filter { $0.countsForRanking }.map(HighlightEvent.init)))
         for s in friendSummaries() {
-            let events = friendEvents(s.person.id).map(HighlightEvent.init)
+            let events = friendEvents(s.person.id).filter { $0.countsForRanking }.map(HighlightEvent.init)
             out.append(HighlightParticipant(id: s.person.id, handle: s.person.handle, color: s.person.color, events: events))
         }
         return out
@@ -18,7 +19,7 @@ public extension Store {
         let members = z.members.values.sorted { $0.joinedAt < $1.joinedAt }
         let labels = HandleRules.groupLabels(members.map { ($0.id, $0.person.handle, $0.joinedAt) })
         var byOwner: [UserID: [HighlightEvent]] = [:]
-        for e in z.events.values { byOwner[e.ownerID, default: []].append(HighlightEvent(e)) }
+        for e in z.events.values where e.countsForRanking { byOwner[e.ownerID, default: []].append(HighlightEvent(e)) }
         return members.map { m in
             let label = labels[m.id].map { String($0.dropFirst()) } ?? m.person.handle
             return HighlightParticipant(id: m.id, handle: label, color: m.person.color, events: byOwner[m.id] ?? [])
@@ -30,6 +31,7 @@ public extension Store {
     }
 
     /// Personal highlights: only my own poops (the YOU tab and the daily/weekly/monthly reports).
+    /// Personal stats include everything in history, manual and imported poops too.
     func myHighlightCards(period: HighlightPeriod, reference: Date? = nil) -> [HighlightCard] {
         let me = HighlightParticipant(id: userID ?? UserID.localMe, handle: profile.handle, color: profile.color, events: my.events.values.map(HighlightEvent.init))
         return HighlightsEngine.cards(for: [me], period: period, reference: reference ?? clock(), calendar: calendar, isGroup: false)

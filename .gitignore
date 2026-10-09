@@ -16,3 +16,10 @@ Tools/LinuxCore/.build/
 *.p12
 *.mobileprovision
 .env
+# Firebase — never commit the project config or service accounts
+GoogleService-Info.plist
+firebase/functions/node_modules/
+firebase/functions/lib/
+firebase/.firebase/
+firebase/*-debug.log
+firebase-service-account*.json

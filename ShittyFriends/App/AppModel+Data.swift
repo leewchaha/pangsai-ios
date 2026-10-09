@@ -44,8 +44,22 @@ extension AppModel {
         return written == expectedSize ? out : nil
     }
 
-    /// Deletes everything this app stored for me: local files, my iCloud zones (history, settings,
-    /// groups I own, invites), my pings, and my membership in other people's zones.
+    // MARK: - Account
+
+    /// Signs out. History stays on this phone (local-first) and in the account; sync, friends and alerts
+    /// pause until someone signs in. A *different* account signing in later clears this phone first
+    /// (see `AppModel.authChanged`), so histories never mix.
+    func signOut() async {
+        busy = "Signing out…"
+        defer { busy = nil }
+        flushAllPending()
+        await push.unregister()
+        auth.signOut()
+        sync.stop()
+    }
+
+    /// Deletes everything about me: on the server (history, friendships, memberships, groups I own, my
+    /// sign-in) and on this device.
     func deleteAllMyData() async {
         busy = "Deleting…"
         isDeletingAll = true
@@ -53,54 +67,35 @@ extension AppModel {
             busy = nil
             isDeletingAll = false
         }
-        let userID = store.userID
-        // Leave zones others shared with me and revoke what I shared.
-        for link in store.my.friendLinks.values {
-            if let uid = link.userID { shares.leave(ZoneRef(ownerName: uid, zoneName: ZoneNames.me)) }
+        do {
+            try await social.deleteAccount()
+        } catch {
+            self.error("Couldn't delete on the server", error)
+            return
         }
-        for link in store.my.groupLinks.values {
-            if link.isOwner { shares.deleteOwned(link.zone) } else {
-                store.removeGroupLocal(link.id)
-                shares.leave(link.zone)
-            }
-        }
-        for space in store.my.spaceLinks.values {
-            if space.isOwner { shares.deleteOwned(space.zone) } else { shares.leave(space.zone) }
-        }
-        for token in store.my.invites.keys { await shares.deleteInviteCard(token: token) }
-        // Deleting my zones also deletes their shares (friends lose access to my history).
-        shares.deleteOwned(.me)
-        shares.deleteOwned(.privateZone)
-        shares.deleteOwned(ZoneRef(ownerName: ZoneRef.currentUser, zoneName: ZoneNames.invites))
-        await cloud.sendAll()
-        pings.cleanupExpired(now: .distantFuture)
-        await pings.deleteAllSubscriptions()
-        wipeLocal(keepingUserID: userID)
+        await push.unregister()
+        auth.signOut()
+        wipeLocal()
+        showSession = false
+        sheet = nil
         log.info("all data deleted")
     }
 
-    /// Another device deleted my iCloud data (or the user removed it in Settings): match it here.
-    func wipeAfterRemoteDeletion() {
-        guard !isDeletingAll else { return }
-        log.info("my zones were deleted elsewhere; wiping local copy")
-        let userID = store.userID
-        Task { await pings.deleteAllSubscriptions() }
-        wipeLocal(keepingUserID: userID)
-        showSession = false
-        sheet = nil
-        info("DATA DELETED", "Your ShittyFriends data was deleted from iCloud.")
+    private func flushAllPending() {
+        saveNow()
+        sync.sendAll()
     }
 
-    /// Clears everything on this device but stays signed in to the same iCloud account,
-    /// so the app keeps working (onboarding starts again) without a relaunch.
-    private func wipeLocal(keepingUserID userID: UserID?) {
-        pings.reset()
+    /// Clears everything on this device (onboarding starts again).
+    private func wipeLocal() {
+        push.reset()
         notifications.clearAll()
+        sync.stop()
         store.resetForAccountChange(keepOnboarding: false)
+        store.setUserID(nil)
         persistence.wipe()
-        cloud.resetLocalSyncState()
+        sync.resetLocalSyncState()
         UserDefaults.standard.removeObject(forKey: "sf.initialUploadDone")
-        if let userID { store.setUserID(userID) }
         saveNow()
     }
 }

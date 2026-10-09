@@ -216,6 +216,8 @@ struct SimpleEvent: PoopLike {
     var location: PoopLocation?
     var pwmSessionID: UUID? { nil }
     var partyID: UUID? { nil }
+    var manuallyAdjusted: Bool { false }
+    var imported: Bool { false }
 
     init(_ e: HighlightEvent) {
         startedAt = e.startedAt

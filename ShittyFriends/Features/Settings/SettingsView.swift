@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var exportURL: URL?
     @State private var importing = false
     @State private var confirmDelete = false
+    @State private var confirmSignOut = false
     @State private var notificationsAllowed = true
     @State private var locationDeniedAlert = false
     @Environment(\.scenePhase) private var scenePhase
@@ -97,7 +98,7 @@ struct SettingsView: View {
                 Section("BLOCKED") {
                     ForEach(store.settings.blockedUserIDs, id: \.self) { uid in
                         HStack {
-                            Text(store.person(for: uid).map { "@" + $0.handle } ?? "Blocked person")
+                            Text(store.blockedLabel(uid))
                             Spacer()
                             Button("Unblock") { store.unblock(uid) }
                         }
@@ -107,12 +108,26 @@ struct SettingsView: View {
 
             Section {
                 HStack {
-                    Text("iCloud")
+                    Text("Account")
                     Spacer()
-                    Text(model.availability.isAvailable ? "Connected" : (model.availability.message ?? "Checking…"))
+                    Text(accountStatus)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.trailing)
                 }
+                if model.auth.isSignedIn {
+                    Button("Sign out") { confirmSignOut = true }
+                } else if model.availability != .notConfigured {
+                    Button("Sign in") { model.sheet = .signIn }
+                }
+            } header: {
+                Text("ACCOUNT")
+            } footer: {
+                Text(model.auth.isSignedIn
+                     ? "Signing out pauses sync, friends and alerts; your history stays on this phone and in your account. A different account signing in clears this phone first."
+                     : "Friends, groups and alerts need an account (Sign in with Apple\(model.auth.isGoogleAvailable ? " or Google" : "")). Logging works without one.")
+            }
+
+            Section {
                 Button("Export my data") {
                     do { exportURL = try model.makeExport() } catch { model.error("Export failed", error) }
                 }
@@ -123,13 +138,15 @@ struct SettingsView: View {
             } header: {
                 Text("YOUR DATA")
             } footer: {
-                Text("Your data lives on this device and in your own iCloud. ShittyFriends has no server with your poop history. Import takes the export .zip as-is (or the poop-history.json inside it); imported poops never bring points.")
+                Text("Your data lives on this device and, when you're signed in, in your ShittyFriends account (Firebase). Friends see your history, groups see what you share with them, nobody else. Import takes the export .zip as-is (or the poop-history.json inside it); imported poops never bring points and stay out of leaderboards.")
             }
 
             Section {
-                Button("Delete all my data", role: .destructive) { confirmDelete = true }
+                Button(model.auth.isSignedIn ? "Delete my account and all my data" : "Delete all my data", role: .destructive) { confirmDelete = true }
             } footer: {
-                Text("Deletes your history, groups you own and your shares from iCloud and this device. Your other devices on this iCloud account clear their copy too.")
+                Text(model.auth.isSignedIn
+                     ? "Deletes your history, friendships, memberships, groups you own and your sign-in from the server, and everything on this device. Your other devices sign out."
+                     : "Deletes everything on this device.")
             }
 
             Section("ABOUT") {
@@ -180,6 +197,21 @@ struct SettingsView: View {
             }
         } message: {
             Text("This can't be undone. Export first if you want a copy.")
+        }
+        .confirmationDialog("Sign out?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+            Button("Sign out", role: .destructive) {
+                Task { await model.signOut() }
+            }
+        } message: {
+            Text("Unsent changes are sent first. Your history stays here; sync, friends and alerts pause until you sign in again.")
+        }
+    }
+
+    private var accountStatus: String {
+        switch model.auth.state {
+        case .signedIn(_, let provider): return provider == "apple.com" ? "Apple" : provider == "google.com" ? "Google" : "Signed in"
+        case .signedOut: return model.availability == .notConfigured ? "Not configured" : "Not signed in"
+        case .unknown: return "Checking…"
         }
     }
 }

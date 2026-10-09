@@ -54,18 +54,3 @@ final class EffectLog {
         effects.compactMap { if case .ping(let p) = $0 { return p } else { return nil } }
     }
 }
-
-/// Reversible fake sealer for tests (the app uses AES-GCM).
-struct FakeSealer: PayloadSealer {
-    func seal(_ plaintext: Data, keyBase64URL: String) throws -> String {
-        let key = Array(keyBase64URL.utf8)
-        let bytes = plaintext.enumerated().map { $0.element ^ key[$0.offset % key.count] }
-        return Data(bytes).base64URLEncodedString()
-    }
-
-    func open(_ sealed: String, keyBase64URL: String) throws -> Data {
-        guard let data = Data(base64URLEncoded: sealed) else { throw NSError(domain: "fake", code: 1) }
-        let key = Array(keyBase64URL.utf8)
-        return Data(data.enumerated().map { $0.element ^ key[$0.offset % key.count] })
-    }
-}

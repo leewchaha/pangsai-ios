@@ -1,0 +1,270 @@
+rules_version = '2';
+
+// ShittyFriends Firestore rules.
+//
+// Visibility model (handoff §30): a user's history is readable by the user and their full friends;
+// group spaces are readable/writable by members only; ad-hoc session spaces by their members.
+// Membership changes that must stick (approvals, kicks/bans, leaving) go through Cloud Functions;
+// everything else is written by the client under these rules.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function isMe(uid) { return signedIn() && me() == uid; }
+
+    function pairID(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
+
+    function areFriends(a, b) {
+      return exists(/databases/$(database)/documents/friendships/$(pairID(a, b)));
+    }
+
+    function blocked(blocker, other) {
+      return exists(/databases/$(database)/documents/users/$(blocker)/blocks/$(other));
+    }
+
+    function groupDoc(gid) { return get(/databases/$(database)/documents/groups/$(gid)).data; }
+    function isGroupMember(gid) { return signedIn() && me() in groupDoc(gid).memberIDs; }
+    function isGroupOwner(gid) { return signedIn() && me() == groupDoc(gid).ownerID; }
+    // Same, but seen *after* the current batch (a group is created together with its owner row and invite code).
+    function isGroupOwnerAfter(gid) { return signedIn() && me() == getAfter(/databases/$(database)/documents/groups/$(gid)).data.ownerID; }
+
+    function spaceDoc(sid) { return get(/databases/$(database)/documents/spaces/$(sid)).data; }
+    function isSpaceMember(sid) { return signedIn() && me() in spaceDoc(sid).memberIDs; }
+
+    // Live records in a group/space: a poop copy, session, participant row, reaction, party, RSVP.
+    // Each one names the person who may write it.
+    function ownsEvent() { return request.resource.data.ownerID == me(); }
+    function ownsExistingEvent() { return resource.data.ownerID == me(); }
+
+    // ---------- users ----------
+
+    match /users/{uid} {
+      // Profile: readable by me, my friends, and anyone who shares a group/space with me
+      // (member rows carry a copy of the profile, so this is a convenience, not a leak of history).
+      allow read: if isMe(uid) || (signedIn() && areFriends(me(), uid));
+      allow create, update: if isMe(uid);
+      allow delete: if false; // deleteAccount (Cloud Function) only
+
+      match /events/{eventID} {
+        allow read: if isMe(uid) || (signedIn() && areFriends(me(), uid));
+        allow write: if isMe(uid);
+      }
+      match /achievements/{id} {
+        allow read: if isMe(uid) || (signedIn() && areFriends(me(), uid));
+        allow write: if isMe(uid);
+      }
+      match /cosmetics/{id} {
+        allow read: if isMe(uid) || (signedIn() && areFriends(me(), uid));
+        allow write: if isMe(uid);
+      }
+
+      // Everything below is private to the owner (Cloud Functions read it with admin rights).
+      match /private/{doc} { allow read, write: if isMe(uid); }
+      match /friendLinks/{id} { allow read, write: if isMe(uid); }
+      match /groupLinks/{id} { allow read, write: if isMe(uid); }
+      match /spaceLinks/{id} { allow read, write: if isMe(uid); }
+      match /invites/{token} { allow read, write: if isMe(uid); }
+      match /devices/{token} { allow read, write: if isMe(uid); }
+      match /blocks/{other} { allow read, write: if isMe(uid); }
+    }
+
+    // ---------- friend invites (QR / link) ----------
+
+    // Holding a token only lets someone *request* friendship. Readable by any signed-in user,
+    // because the token itself is the secret.
+    match /invites/{token} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.resource.data.uid == me();
+      allow delete: if signedIn() && resource.data.uid == me();
+    }
+
+    // ---------- friend requests + friendships ----------
+
+    match /friendRequests/{requestID} {
+      allow read: if signedIn() && (resource.data.from == me() || resource.data.to == me());
+      allow create: if signedIn()
+        && request.resource.data.from == me()
+        && request.resource.data.to != me()
+        && request.resource.data.status == 'pending'
+        && exists(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken))
+        && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken)).data.uid == request.resource.data.to
+        && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken)).data.expiresAt > request.time
+        && !blocked(request.resource.data.to, me())
+        && !blocked(me(), request.resource.data.to);
+      allow delete: if signedIn() && (resource.data.from == me() || resource.data.to == me());
+      allow update: if false;
+    }
+
+    match /friendships/{pair} {
+      allow read: if signedIn() && me() in resource.data.members;
+      // Only the person who received a pending request can create the friendship, and only for
+      // that pair; blocks on either side veto it.
+      allow create: if signedIn()
+        && request.resource.data.members.size() == 2
+        && me() in request.resource.data.members
+        && pair == pairID(request.resource.data.members[0], request.resource.data.members[1])
+        && request.resource.data.acceptedBy == me()
+        && request.resource.data.requestID is string
+        && get(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestID)).data.to == me()
+        && get(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestID)).data.from in request.resource.data.members
+        && !blocked(request.resource.data.members[0], request.resource.data.members[1])
+        && !blocked(request.resource.data.members[1], request.resource.data.members[0]);
+      // Unfriend: either side.
+      allow delete: if signedIn() && me() in resource.data.members;
+      allow update: if false;
+    }
+
+    // ---------- groups ----------
+
+    match /groups/{gid} {
+      allow read: if isGroupMember(gid)
+        || (signedIn() && exists(/databases/$(database)/documents/groups/$(gid)/requests/$(me())));
+      // Creating a group: the creator is the owner and the only member; nobody banned yet.
+      allow create: if signedIn()
+        && request.resource.data.ownerID == me()
+        && request.resource.data.createdBy == me()
+        && request.resource.data.memberIDs == [me()]
+        && request.resource.data.bannedIDs == [];
+      // The owner edits name/icon/colour; the structural lists only change through Cloud Functions.
+      allow update: if isGroupOwner(gid)
+        && request.resource.data.ownerID == resource.data.ownerID
+        && request.resource.data.memberIDs == resource.data.memberIDs
+        && request.resource.data.bannedIDs == resource.data.bannedIDs
+        && request.resource.data.inviteCode == resource.data.inviteCode;
+      allow delete: if false; // deleteGroup / deleteAccount (Cloud Functions)
+
+      match /members/{uid} {
+        allow read: if isGroupMember(gid);
+        // A member refreshes their own row (handle, avatar, cosmetic); joins/kicks/leaves are functions.
+        allow update: if isGroupMember(gid) && isMe(uid) && request.resource.data.person.id == me()
+          && request.resource.data.role == resource.data.role;
+        // The only client-side create: the owner's own row, in the batch that creates the group.
+        allow create: if isMe(uid) && request.resource.data.role == 'owner' && request.resource.data.person.id == me()
+          && isGroupOwnerAfter(gid);
+        allow delete: if false;
+      }
+      match /requests/{uid} {
+        // Join requests are created by the requestJoinGroup function (it checks bans); the owner
+        // sees them, the requester sees their own; decisions are functions too.
+        allow read: if isGroupOwner(gid) || isMe(uid);
+        allow write: if false;
+      }
+      match /events/{eventID} {
+        allow read: if isGroupMember(gid);
+        allow create, update: if isGroupMember(gid) && ownsEvent();
+        allow delete: if isGroupMember(gid) && (ownsExistingEvent() || isGroupOwner(gid));
+      }
+      match /sessions/{sid} {
+        allow read: if isGroupMember(gid);
+        allow create: if isGroupMember(gid) && request.resource.data.creatorID == me();
+        // The creator updates it; anyone taking part may mark it ended.
+        allow update: if isGroupMember(gid)
+          && request.resource.data.creatorID == resource.data.creatorID
+          && (resource.data.creatorID == me() || request.resource.data.state == 'ended');
+        allow delete: if isGroupMember(gid) && resource.data.creatorID == me();
+      }
+      match /participants/{id} {
+        allow read: if isGroupMember(gid);
+        // Me about me, or the session creator inviting someone (status invited, no start time).
+        allow create, update: if isGroupMember(gid) && (
+          request.resource.data.person.id == me()
+          || (request.resource.data.status == 'invited' && !('startedAt' in request.resource.data)
+              && get(/databases/$(database)/documents/groups/$(gid)/sessions/$(request.resource.data.sessionID)).data.creatorID == me()));
+        allow delete: if isGroupMember(gid) && resource.data.person.id == me();
+      }
+      match /reactions/{rid} {
+        allow read: if isGroupMember(gid);
+        allow create: if isGroupMember(gid) && request.resource.data.senderID == me();
+        allow update: if false;
+        allow delete: if isGroupMember(gid) && resource.data.senderID == me();
+      }
+      match /parties/{pid} {
+        allow read: if isGroupMember(gid);
+        allow create: if isGroupMember(gid) && request.resource.data.creatorID == me();
+        allow update: if isGroupMember(gid) && resource.data.creatorID == me()
+          && request.resource.data.creatorID == me();
+        allow delete: if isGroupMember(gid) && resource.data.creatorID == me();
+      }
+      match /rsvps/{id} {
+        allow read: if isGroupMember(gid);
+        // Me about me, or the party creator inviting someone (response maybe, not joined).
+        allow create, update: if isGroupMember(gid) && (
+          request.resource.data.person.id == me()
+          || (request.resource.data.response == 'maybe' && !('joinedAt' in request.resource.data)
+              && get(/databases/$(database)/documents/groups/$(gid)/parties/$(request.resource.data.partyID)).data.creatorID == me()));
+        allow delete: if isGroupMember(gid) && resource.data.person.id == me();
+      }
+    }
+
+    // Group invite codes: anyone signed in can resolve a code to a preview; the owner manages it.
+    match /groupInvites/{code} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.resource.data.ownerID == me() && isGroupOwnerAfter(request.resource.data.gid);
+      allow delete: if signedIn() && isGroupOwner(resource.data.gid);
+    }
+
+    // ---------- ad-hoc spaces (Poop With Me / parties between friends) ----------
+
+    match /spaces/{sid} {
+      // Provable for both single reads and the `memberIDs array-contains me` listener.
+      allow read: if signedIn() && me() in resource.data.memberIDs;
+      // The creator lists the friends taking part up front (only actual friends).
+      allow create: if signedIn()
+        && request.resource.data.ownerID == me()
+        && me() in request.resource.data.memberIDs
+        && request.resource.data.memberIDs.size() <= 40;
+      // The owner can add more friends later; nothing else changes.
+      allow update: if signedIn() && resource.data.ownerID == me()
+        && request.resource.data.ownerID == me()
+        && request.resource.data.kind == resource.data.kind
+        && me() in request.resource.data.memberIDs;
+      allow delete: if signedIn() && resource.data.ownerID == me();
+
+      match /sessions/{sessionID} {
+        allow read: if isSpaceMember(sid);
+        allow create: if isSpaceMember(sid) && request.resource.data.creatorID == me();
+        allow update: if isSpaceMember(sid)
+          && request.resource.data.creatorID == resource.data.creatorID
+          && (resource.data.creatorID == me() || request.resource.data.state == 'ended');
+        allow delete: if isSpaceMember(sid) && resource.data.creatorID == me();
+      }
+      match /participants/{id} {
+        allow read: if isSpaceMember(sid);
+        allow create, update: if isSpaceMember(sid) && (
+          request.resource.data.person.id == me()
+          || (request.resource.data.status == 'invited' && !('startedAt' in request.resource.data)
+              && get(/databases/$(database)/documents/spaces/$(sid)/sessions/$(request.resource.data.sessionID)).data.creatorID == me()));
+        allow delete: if isSpaceMember(sid) && resource.data.person.id == me();
+      }
+      match /reactions/{rid} {
+        allow read: if isSpaceMember(sid);
+        allow create: if isSpaceMember(sid) && request.resource.data.senderID == me();
+        allow update: if false;
+        allow delete: if isSpaceMember(sid) && resource.data.senderID == me();
+      }
+      match /parties/{pid} {
+        allow read: if isSpaceMember(sid);
+        allow create: if isSpaceMember(sid) && request.resource.data.creatorID == me();
+        allow update: if isSpaceMember(sid) && resource.data.creatorID == me()
+          && request.resource.data.creatorID == me();
+        allow delete: if isSpaceMember(sid) && resource.data.creatorID == me();
+      }
+      match /rsvps/{id} {
+        allow read: if isSpaceMember(sid);
+        allow create, update: if isSpaceMember(sid) && (
+          request.resource.data.person.id == me()
+          || (request.resource.data.response == 'maybe' && !('joinedAt' in request.resource.data)
+              && get(/databases/$(database)/documents/spaces/$(sid)/parties/$(request.resource.data.partyID)).data.creatorID == me()));
+        allow delete: if isSpaceMember(sid) && resource.data.person.id == me();
+      }
+      // No group events in a space: history stays between friends, in users/{uid}/events.
+      match /events/{eventID} { allow read, write: if false; }
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}

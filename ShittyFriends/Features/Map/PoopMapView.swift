@@ -868,7 +868,8 @@ struct PoopPin: View {
                 context.date.timeIntervalSince($0) >= 0 && context.date.timeIntervalSince($0) < 600
             } ?? false
 
-            Object3DImage(subject: .poop(.classic), size: 54)
+            // The pin is the newest pooper's equipped poop; their equipped shine appears only when the pin is tapped.
+            Object3DImage(subject: .poop(profile?.cosmetic ?? .classic), size: 54)
                 .frame(width: 58, height: 58)
                 .background {
                     // Only the tapped marker receives animated radiance. The fixed 58pt
@@ -1073,9 +1074,10 @@ struct ClusterCard: View {
     var body: some View {
         let points = cluster.pointsByRecency
         let people = cluster.ownerIDsByRecency.count
+        let latestCosmetic = cluster.ownerIDsByRecency.first.flatMap { model.store.person(for: $0)?.cosmetic } ?? .classic
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Object3DImage(subject: .poop(.classic), size: 28)
+                Object3DImage(subject: .poop(latestCosmetic), size: 28)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(cluster.latest?.label ?? "Poop spot")
                         .font(.heading(14))

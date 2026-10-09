@@ -8,6 +8,15 @@
 **App Store Connect API identifier:** `HLBSVSN338`  
 **Important:** No API private key or secret is included in this document.
 
+> **Revision 2026-10-09 (Lee's decisions after the audit).** Multiplayer moved off iCloud/CloudKit to
+> **Firebase** (Auth + Firestore + Cloud Functions + Cloud Messaging) so a Google Play version is
+> possible later. This drops Hard Rule 2.1 ("no developer database"); the *visibility* model (§30) is
+> unchanged and enforced server-side by Firestore rules. The app adds a sign-in step (Sign in with
+> Apple, Google when configured) and server-side data deletion. Group joins are approved by the owner
+> and removals stick. Only live-logged poops count for leaderboards, achievements and group trophies
+> (manual, edited and imported poops stay in history and personal stats). Sections marked *superseded*
+> below are kept for context; `docs/SETUP.md` and `firebase/README.md` describe the current backend.
+
 ---
 
 # 1. Product Vision
@@ -52,23 +61,25 @@ ShittyFriends should develop its own recognizable visual language.
 
 These are foundational and should not be casually changed.
 
-## 2.1 No developer-owned user-data database
+## 2.1 Backend (revised 2026-10-09)
 
-Do **not** use Firebase, Supabase, a custom PostgreSQL server, or any developer-controlled central database to store users' poop histories, locations, groups, or social activity.
+*Superseded.* The original rule ("no developer-owned user-data database") was dropped on 2026-10-09 so
+that an Android / Google Play version can share accounts, friends and groups with iOS.
 
-Canonical personal data should live in:
+Canonical personal data lives in:
 
-1. local device storage
-2. the user's own iCloud / CloudKit private database
-3. CloudKit shared records when the user explicitly shares something
+1. local device storage (first; the app works offline)
+2. the user's ShittyFriends account on Firebase (Firestore), synced when signed in
+3. group / session spaces on Firestore that members can read, enforced by security rules
 
-The developer should not operate a conventional backend containing everybody's poop history.
+The developer runs the Firebase project. The visibility model in §30 still holds exactly: friends see
+full history, group members see only what was shared to the group, nobody sees anything else.
 
 ## 2.2 Local-first
 
 The app should remain usable when offline.
 
-Local state should update immediately, then reconcile with CloudKit.
+Local state should update immediately, then reconcile with the server (Firestore).
 
 The UI must never feel like it is "waiting for the server" after tapping POOPING.
 
@@ -1385,7 +1396,9 @@ metadata
 
 # 29. CloudKit Architecture Direction
 
-Recommended:
+*Superseded 2026-10-09 by the Firebase backend (`firebase/README.md`). Kept for context.*
+
+Recommended (original):
 
 ```text
 SwiftUI
@@ -1979,10 +1992,14 @@ Do not make it mandatory for the first prototype.
 11. Group-only members do not.
 12. Friend access is retroactive to old history.
 13. Shared poop locations remain in history permanently until edited/deleted.
-14. No central ShittyFriends user database.
+14. ~~No central ShittyFriends user database.~~ (Dropped 2026-10-09: Firebase backs sync, friends and groups.)
 15. No global username uniqueness dependency.
 16. Duplicate handles use temporary `(1)`, `(2)` labels within conflicting groups.
-17. Points reward tapping interaction inside timed sessions. Every timed session can earn points; there is no daily earning cap, but each session remains capped.
+17. Points reward tapping interaction inside timed sessions. Every timed session can earn points; there is no daily cap and no per-session cap (only the 0.06 s auto-tapper guard).
+21. Only live-logged poops (POOP NOW / double tap / JOIN) count for leaderboards, achievements, group trophies and social highlights. Poops added later, imported, or whose time/place was corrected stay in history and personal stats only.
+22. A Poop Party counts only if at least one other person joined it.
+23. Group joins are approved by the owner; a removed member cannot rejoin with the link.
+24. Blocking is friends-only; a blocked person can never become a friend again until unblocked.
 18. The app must stay funny and tactile rather than clinical.
 19. 3D objects and motion are a first-class product feature.
 20. Notifications must be easy to silence.
@@ -2147,4 +2164,4 @@ The most important product distinction is:
 
 And the most important technical principle is:
 
-> **The user's device and iCloud own the data, not ShittyFriends' server.**
+> **The user's device owns the data first; the account (Firebase) keeps it safe, in sync and shared only with the people the user chose.**

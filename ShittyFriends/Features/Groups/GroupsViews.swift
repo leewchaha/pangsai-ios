@@ -50,9 +50,31 @@ struct GroupsView: View {
                         SectionTitle("POOP PARTIES", trailing: "+ SCHEDULE") { newParty = true }
                     }
 
+                    let pending = store.pendingGroupLinks
+                    if !pending.isEmpty {
+                        SectionTitle("WAITING FOR APPROVAL")
+                        ForEach(pending) { link in
+                            HStack(spacing: 12) {
+                                Object3DImage(subject: .group(store.cache.zones[link.zone]?.group?.object ?? .toilet), size: 40)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(link.nameCache.uppercased()).font(.heading(14)).foregroundStyle(Palette.ink).lineLimit(1)
+                                    Text("The owner hasn't let you in yet.").font(.ui(12, .medium)).foregroundStyle(Palette.muted)
+                                }
+                                Spacer()
+                                Button("CANCEL") { model.leaveGroup(link.id) }
+                                    .font(.heading(11))
+                                    .foregroundStyle(Palette.ink)
+                                    .frame(minHeight: 32)
+                            }
+                            .padding(12)
+                            .calmSurface(Palette.card, radius: 16)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+
                     SectionTitle("YOUR GROUPS · \(store.groupSummaries.count)")
                     if store.groupSummaries.isEmpty {
-                        EmptyState(emoji: "🚽", title: "NO GROUPS YET", message: "Make one for The Boys, your dorm, your class trip. Share the link; anyone with it can join.")
+                        EmptyState(emoji: "🚽", title: "NO GROUPS YET", message: "Make one for The Boys, your dorm, your class trip. Share the link; people ask to join and you let them in.")
                     }
                     ForEach(store.groupSummaries) { g in
                         NavigationLink { GroupDetailView(groupID: g.link.id) } label: { GroupCard(group: g) }
@@ -141,6 +163,8 @@ struct CreateGroupView: View {
                                     .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(o == object ? Palette.line : Color.clear, lineWidth: 2))
                             }
                             .buttonStyle(PressableStyle())
+                            .accessibilityLabel("\(o.emoji) \(o.rawValue)")
+                            .accessibilityAddTraits(o == object ? .isSelected : [])
                         }
                     }
                     SectionTitle("COLOR")
@@ -198,15 +222,15 @@ struct GroupJoinConfirmView: View {
         VStack(spacing: 18) {
             Spacer()
             Object3DImage(subject: .group(offer.object), size: 140)
-            Text("JOIN \(offer.name.uppercased())?")
+            Text("ASK TO JOIN \(offer.name.uppercased())?")
                 .font(.display(26))
                 .multilineTextAlignment(.center)
-            Text("Members will see the poops you share to this group, live sessions and the leaderboard.\n\nGroup membership is not friendship: they can't open your full history unless you're also shitty friends.")
+            Text("The owner approves every join. Once you're in, members see the poops you share to this group, live sessions and the leaderboard.\n\nGroup membership is not friendship: they can't open your full history unless you're also shitty friends.")
                 .font(.ui(15, .medium))
                 .foregroundStyle(Palette.muted)
                 .multilineTextAlignment(.center)
             Spacer()
-            Button("JOIN GROUP") {
+            Button("ASK TO JOIN") {
                 dismiss()
                 Task { await model.joinGroup(offer) }
             }
@@ -287,8 +311,8 @@ struct GroupDetailView: View {
 
                 Picker("Period", selection: $period) {
                     Text("TODAY").tag(HighlightPeriod.day)
-                    Text("THIS WEEK").tag(HighlightPeriod.week)
-                    Text("THIS MONTH").tag(HighlightPeriod.month)
+                    Text("WEEK").tag(HighlightPeriod.week)
+                    Text("MONTH").tag(HighlightPeriod.month)
                 }
                 .pickerStyle(.segmented)
 
@@ -305,6 +329,11 @@ struct GroupDetailView: View {
                         Text("\(total) 💩").font(.digits(20))
                     }
                     .padding(.top, 10)
+                    .accessibilityElement(children: .combine)
+                    Text("Live-logged poops only. Added-later, edited and imported poops stay in personal history.")
+                        .font(.ui(11, .medium))
+                        .foregroundStyle(Palette.muted)
+                        .padding(.top, 4)
                 }
                 .foregroundStyle(Palette.ink)
                 .padding(14)
@@ -367,6 +396,35 @@ struct GroupDetailView: View {
                         .buttonStyle(PressableStyle())
                 }
 
+                let requests = store.joinRequests(groupID)
+                if !requests.isEmpty {
+                    SectionTitle("WANT TO JOIN · \(requests.count)")
+                    ForEach(requests) { r in
+                        HStack(spacing: 12) {
+                            AvatarView(person: r.person, size: 42)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HandleText(handle: r.person.handle, size: 15)
+                                Text("asked " + r.createdAt.formatted(.relative(presentation: .named)))
+                                    .font(.ui(12, .medium))
+                                    .foregroundStyle(Palette.muted)
+                            }
+                            Spacer()
+                            Button("LET IN") { Task { await model.approveJoin(groupID, request: r) } }
+                                .buttonStyle(StickerButtonStyle(fill: Palette.lime, ink: Palette.inkFixed, radius: 14, height: 38, font: .heading(11), fullWidth: false, shadow: 0))
+                            Button {
+                                Task { await model.declineJoin(groupID, request: r) }
+                            } label: {
+                                Image(systemName: "xmark").font(.system(size: 13, weight: .black)).foregroundStyle(Palette.muted)
+                                    .frame(width: 38, height: 38)
+                            }
+                            .buttonStyle(PressableStyle())
+                            .accessibilityLabel("Decline @\(r.person.handle)")
+                        }
+                        .padding(10)
+                        .calmSurface(Palette.card, radius: 16)
+                    }
+                }
+
                 SectionTitle("MEMBERS · \(g.members.count)")
                 ForEach(g.members) { m in
                     HStack(spacing: 12) {
@@ -380,7 +438,7 @@ struct GroupDetailView: View {
                         Spacer()
                         if g.link.isOwner && m.id != store.userID {
                             Menu {
-                                Button("Remove from group", role: .destructive) {
+                                Button("Remove from group (can't rejoin)", role: .destructive) {
                                     Task { await model.removeMember(groupID, member: m) }
                                 }
                             } label: {
@@ -416,7 +474,7 @@ struct GroupDetailView: View {
                             dismiss()
                         }
                     } message: {
-                        Text(g.link.isOwner ? "You created this group, so it ends for all members." : "Your shared poops are removed from the group.")
+                        Text(g.link.isOwner ? "You created this group, so it ends for all members." : "Your shared poops are removed from the group. You can ask to join again with the link.")
                     }
             }
             .gutter()
@@ -426,7 +484,7 @@ struct GroupDetailView: View {
         .clearsTabBar()
         .background(Palette.paper.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await model.cloud.fetch(zone: g.link.zone) }
+        .refreshable { await model.sync.fetchZone(g.link.zone) }
         .onAppear { model.startPolling(g.link.zone, every: 15) }
         .onDisappear { model.stopPolling(g.link.zone) }
         .sheet(isPresented: $showInvite) {
@@ -471,6 +529,8 @@ struct LeaderRow: View {
             Text("\(count)").font(.digits(22))
         }
         .padding(.vertical, 8)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(rank + 1). \(label)\(isMe ? ", you" : ""), \(count) \(count == 1 ? "poop" : "poops")")
     }
 }
 
@@ -486,7 +546,7 @@ struct GroupInviteSheet: View {
                 Label("SHARE LINK", systemImage: "square.and.arrow.up")
             }
             .buttonStyle(.sticker(Palette.sun))
-            Text("Anyone with this link can join the group. Joining doesn't make them your friend.")
+            Text("Anyone with this link can ask to join; you approve each one. Joining doesn't make them your friend.")
                 .font(.ui(13, .medium))
                 .foregroundStyle(Palette.muted)
                 .multilineTextAlignment(.center)

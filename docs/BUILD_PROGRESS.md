@@ -132,3 +132,115 @@ Still no toolchain here: 4 independent read-only reviews (compile + hand-traced 
   personal only on YOU; groups get their own stories from the group page (▶ PLAY). Posters redrawn on a fixed
   360×640 canvas scaled for preview and exported at ×3 (same layout everywhere, every handle shrinks instead of
   clipping). Profile poster carries a friend-invite QR.
+
+## Session 4 (2026-10-09): Lee's decisions on the audit — part 1 (backend-independent)
+
+No toolchain here either (download.swift.org is blocked from this container): nothing below was compiled or
+run. Every change was traced by hand; **the first Codemagic `ios-check` run is the compile check.**
+
+Decisions applied:
+- **Counting rule.** Only live-logged poops count for leaderboards (group + friends), achievements, group
+  trophies and the social (group / friends) highlights. Poops *added later*, *imported* (new
+  `PoopEvent.imported` flag, set by Import) or *corrected afterwards* (`manuallyAdjusted`) stay in history,
+  the calendar, personal stats and personal highlights. `PoopLike.countsForRanking` is the one rule;
+  `GroupEvent` carries the two flags so every member applies it. "Corrected" now means the start time, the
+  end time of an already finished poop, or the pin's coordinates changed; renaming a place, ending a
+  still-running timer from the editor, or toggling group sharing are not corrections. Old records without
+  the flags decode as before (tolerant decoders on `PoopEvent`, `GroupEvent`, `AppSettings`).
+- **No solo party farm.** Party Animal and Perfect Attendance only count parties that at least one other
+  person joined (`MyState.confirmedSocialParties`, device-local like `confirmedSocialSessions`).
+- **International Incident** needs two *different members* in two different countries, from live logs.
+- **Poop With Me has no 3-hour cutoff while someone is still in it**; only sessions where nobody is pooping
+  any more age out. The "Still pooping?" reminder, the timer and the "pooping now" presence are unchanged
+  (they already ran until stopped).
+- **No logging cooldown**, no anti-auto-tapper change (0.06 s guard, uncapped) — nothing added.
+- **Blocking stays friends-only**, and the gap is closed: a blocked person can no longer come back through
+  the accept/complete handshake steps, a stale friend link synced from another device, their lingering
+  shared zone, or a repeated `upsertFriendLink`. `block` drops the link + cached history on the spot and
+  keeps the handle for the Blocked list (`AppSettings.blockedHandles`); a block made on another device drops
+  the friend here when settings sync. Unblocking is the only way back.
+- **Notification JOIN checks.** `Store.canJoinParty` / `canJoinPWM`: a JOIN (notification action, Home card,
+  party page) is honoured only for a scheduled party inside its window that I haven't joined, or an open
+  session I'm not already pooping in; otherwise the app explains (already in / cancelled / over / not yet)
+  instead of silently creating a poop. A JOIN tapped before the party/session synced still counts +1 at
+  once; if the target turns out over or cancelled the poop stays and the dead reference is detached.
+- **Map pins** show each owner's equipped poop (newest pooper of the spot; same in the pin card and the
+  shine shop previews); the equipped shine still appears only when the pin is tapped.
+- **Settings stays behind the 3D poop on YOU** (no change).
+- UI / accessibility / Dark Mode: points figures use grouping everywhere ("100,000 PTS"); history rows
+  use the faceless 3D poop instead of the emoji; "imported" label in history; rarity pills use white ink
+  on blue/violet; locked UNLOCK buttons use adaptive ink; period pickers read TODAY / WEEK / MONTH on both
+  YOU and group pages; onboarding secondary buttons match the rest (NOT NOW / SKIP FOR NOW); VoiceOver
+  labels for avatar part/tone pickers, group icon picker, trophies (locked + progress), invite card
+  buttons, section buttons, onboarding step indicator; combined elements for stat tiles, leader rows,
+  participant tiles, history rows; Reduce Motion honoured by the friend pulse, flying poops, confetti,
+  the busy spinner, the blob background and the idle 3D sway.
+- Tests: `ShittyFriendsTests/CountingRulesTests.swift` (counting rule, corrections, tolerant decoding,
+  solo parties, JOIN checks, session cutoff, blocking paths, International Incident).
+
+## Session 4 (2026-10-09): part 2 — Firebase backend replaces CloudKit
+
+Still no Swift toolchain in the container; the Cloud Functions were type-checked with `tsc` (clean),
+the Python preflight tests pass (19), YAML parses. **The Swift side is unverified until `ios-check`.**
+
+What changed (decision: Firebase Auth + Firestore + Cloud Functions + FCM, so a Google Play version
+can share accounts/friends/groups; handoff Hard Rule 2.1 dropped):
+- **Backend** (`firebase/`): `firestore.rules` enforce the visibility model (friends read full history;
+  group members read group copies; blocks veto requests/friendships; `memberIDs`/`bannedIDs` client
+  read-only), `firestore.indexes.json`, Cloud Functions in TypeScript (`onPoopAnnounced` fan-out with
+  per-friend/per-group levels, quiet hours, private lock screen; Poop With Me invite/join pushes; party
+  invites; friend request/acceptance pushes; `requestJoinGroup` / `approveJoin` / `declineJoin` /
+  `cancelJoinRequest` / `kickMember` (bans) / `unbanMember` / `leaveGroup` / `deleteGroup`;
+  `deleteAccount`; daily `cleanupExpired`). `firebase/README.md` documents the schema.
+- **iOS services** (`ShittyFriends/Services/Firebase/`): `FirebaseConfig` (+ `FirestorePaths`,
+  `CloudAvailability`), `FirestoreCoder`, `AuthService` (Sign in with Apple; Google when the config
+  carries a CLIENT_ID), `FirebaseSync` (queued writes + live listeners for my records, friends,
+  groups, spaces, requests; one-shot fetches after a notification tap; `announce` for poop alerts),
+  `SocialService` (friend requests/friendships, group callables, spaces, blocks mirror, account
+  deletion), `PushService` (FCM token per device, NSE settings file).
+  Removed: `Services/CloudKit/*`, `Services/Pings/PingService`, `Services/Crypto/AESSealer`,
+  `Core/Social/PingPlanner` (kept for reference under `docs/legacy-cloudkit/sources/`, with the
+  CloudKit schema and docs).
+- **Core**: `FriendLink` (userID, status, notify, requestID), `OutgoingInvite` (token only),
+  `IncomingFriendRequest`, `GroupLink.status` (requested/active), `GroupInfo.inviteCode`,
+  `GroupMember` without inbox, new `GroupJoinRequest` + `RecordRef.joinRequest`, `SpaceLink.title`,
+  `ZoneRef.group/space(_:ownerID:me:)`, tolerant decoders everywhere, `AppSettings.timeZoneID`.
+  Store: handshake rewritten on request/friendship records (`beginFriendRequest`, `markRequestSent`,
+  `acceptFriendRequest`, `friendshipConfirmed`, `friendshipEnded`); groups with owner approval
+  (`registerGroupRequest`, `groupApproved`, `groupRequestEnded`, `joinRequests`, `settleJoinRequest`,
+  `pendingGroupLinks`); `groupSummaries` lists members only. `Pings.swift` keeps `PingKind`,
+  `NotificationCategory`, `PushField`, a settings-only `PingDirectory` and `NotificationTextBuilder`
+  (same copy as the server). Deep links: friend invite v2 carries the inviter's id (v1 still parses),
+  group invite carries the join code; iCloud share links are gone.
+- **App**: `AppModel` wires auth → sync/social/push; effects map onto Firestore (`.ping(.poop)` →
+  `announce` after the Undo window; invites/joins are server-pushed); sign-out keeps local data and
+  pauses sync, a different account signing in resets the device; `deleteAllMyData` = server-side
+  `deleteAccount` + local wipe. `AppDelegate` hands the APNs token to FCM. Notification taps resolve
+  the group/space from the push (`sf_group_id` / `sf_space`) and read it before JOIN attaches.
+  NSE re-renders alert text from push data with the device's private-mode / quiet-hours file.
+- **UI**: onboarding gains a sign-in step (skippable: logging works without an account);
+  `SignInView` also behind YOU → Settings → Account (sign in / sign out / delete account);
+  GROUPS shows "WAITING FOR APPROVAL"; group page shows "WANT TO JOIN" with LET IN / decline for the
+  owner; join sheet reads "ASK TO JOIN"; removal copy says they can't rejoin.
+- **Build**: `project.yml` adds the firebase-ios-sdk (Auth, Firestore, Functions, Messaging) and
+  GoogleSignIn packages; entitlements drop iCloud and add Sign in with Apple; `Info.plist` drops
+  `CKSharingSupported` and carries a Google redirect placeholder; `codemagic.yaml` injects
+  `GoogleService-Info.plist` from the `firebase` group, replaces the CloudKit workflows with
+  `firebase-deploy`; `scripts/verify_signing_profiles.py` checks Sign in with Apple instead of CloudKit.
+- **Tests**: `PingTests` → `HandshakeTests` (request/friendship flow, declines, unfriend, group
+  requests/approvals); `SocialTests`, `HardeningTests`, `CountingRulesTests`, `CoreLogicTests`,
+  `ExportAndMeshTests` updated for the new models.
+- **Docs**: `docs/SETUP.md` rewritten (Apple portal incl. APNs key + Sign in with Apple, Firebase
+  console steps, Codemagic `firebase` group, device test plan); handoff revised (§2.1, §29, §47 rules
+  14/17 + new 21–24, §50); `firebase/README.md`.
+
+Review pass before packaging (two read-through reviews, no compiler available here): a poop logged
+while a join request is pending no longer mirrors into that group; the onboarding colour list and an
+`async` call inside `??` were compile errors; the `/spaces` read rule is now provable for the
+"spaces I'm in" listener; existing friendships and pending requests replayed on start no longer
+toast; a freshly created group waits for its create batch before its listener attaches (the rules'
+`get()` on a missing document used to read as "group gone"); an accepted request is checked against
+the friendship document before being reported as declined.
+
+Not done / needs the real device + project: APNs key and Firebase console setup are the owner's;
+first compile; the Google sign-in URL scheme on local Xcode builds; the privacy label.

@@ -145,15 +145,24 @@ struct YouView: View {
             VStack(alignment: .leading, spacing: 5) {
                 HandleText(handle: p.handle, size: 22)
                 HStack(spacing: 7) {
-                    Text("\(store.pointsBalance) PTS")
+                    Text("\(formatPoints(store.pointsBalance)) PTS")
                         .font(.heading(11))
                         .foregroundStyle(Palette.inkFixed)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(Capsule().fill(Palette.sun))
-                    Button("EDIT") { editing = true }
-                        .font(.heading(10))
-                        .foregroundStyle(Palette.muted)
+                        .accessibilityLabel("\(formatPoints(store.pointsBalance)) points")
+                    Button {
+                        editing = true
+                    } label: {
+                        Text("EDIT")
+                            .font(.heading(10))
+                            .foregroundStyle(Palette.muted)
+                            .frame(minWidth: 44, minHeight: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityLabel("Edit profile")
                 }
             }
             Spacer()
@@ -219,6 +228,7 @@ struct SnapshotMetric: View {
             }
         }
         .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -246,6 +256,8 @@ struct RevealRow: View {
         }
         .padding(10)
         .calmSurface(Palette.card, radius: 17)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
 }
 
@@ -278,11 +290,18 @@ struct TrophyRoom: View {
                             .sticker(unlocked ? Palette.sun.opacity(0.35) : Palette.card, radius: 18, shadow: 3, stroke: 2)
                         }
                         .buttonStyle(PressableStyle())
+                        .accessibilityLabel(trophyLabel(a, unlocked: unlocked))
                     }
                 }
             }
         }
         .sheet(item: $detail) { a in TrophyDetail(id: a).environment(model).presentationDetents([.medium]) }
+    }
+
+    private func trophyLabel(_ a: AchievementID, unlocked: Bool) -> String {
+        if unlocked { return "\(a.title), unlocked" }
+        if let p = model.store.achievementProgress(a) { return "\(a.title), locked, \(p.current) of \(p.target)" }
+        return "\(a.title), locked"
     }
 }
 
@@ -355,7 +374,7 @@ struct CollectionSection: View {
                         VStack(spacing: 4) {
                             Object3DImage(subject: .poop(c), size: 72, locked: !has && store.pointsBalance < c.price)
                             Text(c.displayName.replacingOccurrences(of: " Poop", with: "").uppercased()).font(.heading(9)).lineLimit(1)
-                            Text(equipped ? "EQUIPPED" : has ? "OWNED" : "\(c.price) PTS")
+                            Text(equipped ? "EQUIPPED" : has ? "OWNED" : "\(formatPoints(c.price)) PTS")
                                 .font(.heading(9))
                                 .foregroundStyle(equipped ? Palette.inkFixed : Palette.ink)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
@@ -388,7 +407,7 @@ struct CosmeticDetail: View {
                 .frame(height: 230)
                 .contentShape(Rectangle())
                 .onTapGesture { pulse += 1; Haptics.play(.tapLight) }
-            Text(id.rarity.displayName).font(.heading(11)).tracking(2).foregroundStyle(Palette.inkFixed)
+            Text(id.rarity.displayName).font(.heading(11)).tracking(2).foregroundStyle(Palette.rarityInk(id.rarity))
                 .padding(.horizontal, 10).padding(.vertical, 4)
                 .background(Capsule().fill(Palette.rarity(id.rarity)))
             Text(id.displayName.uppercased()).font(.display(24))
@@ -401,15 +420,16 @@ struct CosmeticDetail: View {
                 .buttonStyle(.sticker(Palette.sun))
                 .disabled(store.profile.equippedCosmetic == id)
             } else {
-                Button("UNLOCK · \(id.price) PTS") {
+                Button("UNLOCK · \(formatPoints(id.price)) PTS") {
                     if store.pointsBalance >= id.price {
                         confirmSpend = true
                     } else {
-                        model.info("NOT YET", "\(id.price - store.pointsBalance) more points. Keep tapping in future sessions.")
+                        model.info("NOT YET", "\(formatPoints(id.price - store.pointsBalance)) more points. Keep tapping in future sessions.")
                     }
                 }
-                .buttonStyle(.sticker(store.pointsBalance >= id.price ? Palette.lime : Palette.card, ink: Palette.inkFixed))
-                Text("Balance: \(store.pointsBalance) points").font(.ui(13, .semibold)).foregroundStyle(Palette.muted)
+                // A locked item still needs legible ink on the card surface (adaptive, not fixed dark).
+                .buttonStyle(.sticker(store.pointsBalance >= id.price ? Palette.lime : Palette.card, ink: store.pointsBalance >= id.price ? Palette.inkFixed : Palette.ink))
+                Text("Balance: \(formatPoints(store.pointsBalance)) points").font(.ui(13, .semibold)).foregroundStyle(Palette.muted)
             }
         }
         .foregroundStyle(Palette.ink)
@@ -417,20 +437,20 @@ struct CosmeticDetail: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Palette.paper.ignoresSafeArea())
         .confirmationDialog("Unlock \(id.displayName)?", isPresented: $confirmSpend, titleVisibility: .visible) {
-            Button("Spend \(id.price) PTS") {
+            Button("Spend \(formatPoints(id.price)) PTS") {
                 do {
                     try model.store.purchase(id)
                     model.store.equip(id)
                     dismiss()
                 } catch Store.PurchaseError.insufficientPoints(let needed) {
-                    model.info("NOT YET", "\(needed) more points needed.")
+                    model.info("NOT YET", "\(formatPoints(needed)) more points needed.")
                 } catch {
                     model.info("ALREADY YOURS", "")
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You have \(model.store.pointsBalance) PTS. It's equipped right away.")
+            Text("You have \(formatPoints(model.store.pointsBalance)) PTS. It's equipped right away.")
         }
     }
 }
@@ -461,14 +481,15 @@ struct PinShineCollectionSection: View {
                                 PinShineEffect(id: shine, animated: false)
                                     .frame(width: 60, height: 60)
                                     .clipShape(Circle())
-                                Object3DImage(subject: .poop(.classic), size: 34)
+                                // Previewed on the poop the map actually shows for me: my equipped one.
+                                Object3DImage(subject: .poop(store.profile.equippedCosmetic), size: 34)
                             }
                             .opacity(has ? 1 : 0.75)
                             Text(shine.displayName.uppercased())
                                 .font(.heading(10))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.7)
-                            Text(equipped ? "EQUIPPED" : has ? "OWNED" : "\(shine.price) PTS")
+                            Text(equipped ? "EQUIPPED" : has ? "OWNED" : "\(formatPoints(shine.price)) PTS")
                                 .font(.heading(9))
                                 .foregroundStyle(Palette.muted)
                         }
@@ -502,7 +523,7 @@ struct PinShineDetail: View {
                 // Dark stage so light shines (white, gold) read on a light sheet too.
                 Circle().fill(Palette.inkFixed.opacity(0.9)).frame(width: 160, height: 160)
                 PinShineEffect(id: id).frame(width: 160, height: 160).clipShape(Circle())
-                Object3DImage(subject: .poop(.classic), size: 96)
+                Object3DImage(subject: .poop(store.profile.equippedCosmetic), size: 96)
             }
             .frame(height: 170)
             Text(id.displayName.uppercased()).font(.display(22))
@@ -517,15 +538,15 @@ struct PinShineDetail: View {
                 .buttonStyle(.sticker(Palette.sun))
                 .disabled(store.profile.equippedPinShine == id)
             } else {
-                Button("UNLOCK · \(id.price) PTS") {
+                Button("UNLOCK · \(formatPoints(id.price)) PTS") {
                     if store.pointsBalance >= id.price {
                         confirmSpend = true
                     } else {
-                        model.info("NOT YET", "\(id.price - store.pointsBalance) more points. Keep tapping in future sessions.")
+                        model.info("NOT YET", "\(formatPoints(id.price - store.pointsBalance)) more points. Keep tapping in future sessions.")
                     }
                 }
-                .buttonStyle(.sticker(store.pointsBalance >= id.price ? Palette.lime : Palette.card, ink: Palette.inkFixed))
-                Text("Balance: \(store.pointsBalance) points")
+                .buttonStyle(.sticker(store.pointsBalance >= id.price ? Palette.lime : Palette.card, ink: store.pointsBalance >= id.price ? Palette.inkFixed : Palette.ink))
+                Text("Balance: \(formatPoints(store.pointsBalance)) points")
                     .font(.ui(13, .semibold)).foregroundStyle(Palette.muted)
             }
         }
@@ -534,20 +555,20 @@ struct PinShineDetail: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Palette.paper.ignoresSafeArea())
         .confirmationDialog("Unlock \(id.displayName)?", isPresented: $confirmSpend, titleVisibility: .visible) {
-            Button("Spend \(id.price) PTS") {
+            Button("Spend \(formatPoints(id.price)) PTS") {
                 do {
                     try model.store.purchasePinShine(id)
                     model.store.equipPinShine(id)
                     dismiss()
                 } catch Store.PurchaseError.insufficientPoints(let needed) {
-                    model.info("NOT YET", "\(needed) more points needed.")
+                    model.info("NOT YET", "\(formatPoints(needed)) more points needed.")
                 } catch {
                     model.info("ALREADY YOURS", "")
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You have \(model.store.pointsBalance) PTS. It's equipped right away.")
+            Text("You have \(formatPoints(model.store.pointsBalance)) PTS. It's equipped right away.")
         }
     }
 }
@@ -641,6 +662,8 @@ struct ProfileEditor: View {
                                     .overlay(Circle().strokeBorder(Palette.line, lineWidth: avatar.tone == i ? 4 : 2))
                             }
                             .buttonStyle(PressableStyle())
+                            .accessibilityLabel("Tone \(i + 1)")
+                            .accessibilityAddTraits(avatar.tone == i ? .isSelected : [])
                         }
                     }
                     .padding(.vertical, 4)
@@ -675,6 +698,9 @@ struct PartPicker<Option: Hashable>: View {
                                 .scaleEffect(o == selection ? 1.08 : 1)
                         }
                         .buttonStyle(PressableStyle())
+                        // The avatar preview is decorative; VoiceOver needs the option's name.
+                        .accessibilityLabel("\(title.capitalized): \(String(describing: o))")
+                        .accessibilityAddTraits(o == selection ? .isSelected : [])
                     }
                 }
                 .padding(.vertical, 6)

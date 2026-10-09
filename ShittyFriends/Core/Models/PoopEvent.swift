@@ -75,10 +75,12 @@ public struct PoopEvent: Codable, Hashable, Identifiable, Sendable {
     /// Points earned by tapping during this session, in half-point units.
     public var halfPoints: Int
     public var taps: Int
+    /// True for poops that came in through "Import history" (a user-editable file).
+    public var imported: Bool
     public var createdAt: Date
     public var updatedAt: Date
 
-    public init(id: UUID = UUID(), source: PoopSource, startedAt: Date, endedAt: Date? = nil, location: PoopLocation? = nil, pwmSessionID: UUID? = nil, partyID: UUID? = nil, manuallyAdjusted: Bool = false, sharedToGroups: Bool = true, halfPoints: Int = 0, taps: Int = 0, createdAt: Date = Date(), updatedAt: Date = Date()) {
+    public init(id: UUID = UUID(), source: PoopSource, startedAt: Date, endedAt: Date? = nil, location: PoopLocation? = nil, pwmSessionID: UUID? = nil, partyID: UUID? = nil, manuallyAdjusted: Bool = false, sharedToGroups: Bool = true, halfPoints: Int = 0, taps: Int = 0, imported: Bool = false, createdAt: Date = Date(), updatedAt: Date = Date()) {
         self.id = id
         self.source = source
         self.startedAt = startedAt
@@ -90,8 +92,32 @@ public struct PoopEvent: Codable, Hashable, Identifiable, Sendable {
         self.sharedToGroups = sharedToGroups
         self.halfPoints = halfPoints
         self.taps = taps
+        self.imported = imported
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, source, startedAt, endedAt, location, pwmSessionID, partyID, manuallyAdjusted, sharedToGroups, halfPoints, taps, imported, createdAt, updatedAt
+    }
+
+    /// Older local backups / synced records have no `imported` field.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        source = try c.decode(PoopSource.self, forKey: .source)
+        startedAt = try c.decode(Date.self, forKey: .startedAt)
+        endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
+        location = try c.decodeIfPresent(PoopLocation.self, forKey: .location)
+        pwmSessionID = try c.decodeIfPresent(UUID.self, forKey: .pwmSessionID)
+        partyID = try c.decodeIfPresent(UUID.self, forKey: .partyID)
+        manuallyAdjusted = (try? c.decodeIfPresent(Bool.self, forKey: .manuallyAdjusted)) ?? false
+        sharedToGroups = (try? c.decodeIfPresent(Bool.self, forKey: .sharedToGroups)) ?? true
+        halfPoints = (try? c.decodeIfPresent(Int.self, forKey: .halfPoints)) ?? 0
+        taps = (try? c.decodeIfPresent(Int.self, forKey: .taps)) ?? 0
+        imported = (try? c.decodeIfPresent(Bool.self, forKey: .imported)) ?? false
+        createdAt = (try? c.decodeIfPresent(Date.self, forKey: .createdAt)) ?? startedAt
+        updatedAt = (try? c.decodeIfPresent(Date.self, forKey: .updatedAt)) ?? startedAt
     }
 
     public var timestamp: Date { startedAt }
@@ -131,6 +157,15 @@ public protocol PoopLike {
     var location: PoopLocation? { get }
     var pwmSessionID: UUID? { get }
     var partyID: UUID? { get }
+    var manuallyAdjusted: Bool { get }
+    var imported: Bool { get }
+}
+
+public extension PoopLike {
+    /// Only poops logged live (POOP NOW / double tap, Poop With Me and party JOINs) count for
+    /// leaderboards, achievements, group trophies and social highlights. Poops added later, imported
+    /// from a file, or whose time / place was corrected afterwards stay in history and personal stats.
+    var countsForRanking: Bool { source != .manual && !manuallyAdjusted && !imported }
 }
 
 extension PoopEvent: PoopLike {}

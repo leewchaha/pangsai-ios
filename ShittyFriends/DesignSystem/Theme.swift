@@ -47,6 +47,19 @@ enum Palette {
         case .legendary: return sun
         }
     }
+
+    /// Text colour that reads on top of `rarity(_:)` (blue and violet need white ink).
+    static func rarityInk(_ r: Rarity) -> Color {
+        switch r {
+        case .common, .legendary: return inkFixed
+        case .rare, .epic: return .white
+        }
+    }
+}
+
+/// "100,000" everywhere a points figure is shown, so prices and balances read the same way.
+func formatPoints(_ points: Int) -> String {
+    points.formatted(.number.grouping(.automatic))
 }
 
 extension IdentityColor {

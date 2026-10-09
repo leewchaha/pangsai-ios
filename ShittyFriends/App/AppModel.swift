@@ -1,4 +1,3 @@
-import CloudKit
 import Foundation
 import Observation
 import SwiftUI
@@ -38,14 +37,13 @@ struct Toast: Identifiable, Equatable {
     var body: String
 }
 
-/// A group invite waiting for the user's confirmation.
+/// A group invite waiting for the user's confirmation ("ASK TO JOIN?").
 struct GroupJoinOffer: Identifiable {
     let id = UUID()
     var name: String
     var color: IdentityColor
     var object: GroupObject
-    var metadata: CKShare.Metadata?
-    var url: URL?
+    var code: String
 }
 
 /// Which full-screen experience is up.
@@ -60,6 +58,7 @@ enum ActiveSheet: Identifiable, Equatable {
     /// Last week's highlights for one group (from a group highlights notification).
     case groupHighlights(ZoneRef)
     case profilePoster
+    case signIn
 
     var id: String {
         switch self {
@@ -71,6 +70,7 @@ enum ActiveSheet: Identifiable, Equatable {
         case .highlights(let p, let d): return "hl-\(p.rawValue)-\(d.timeIntervalSince1970)"
         case .groupHighlights(let z): return "ghl-" + z.description
         case .profilePoster: return "profile-poster"
+        case .signIn: return "sign-in"
         }
     }
 }
@@ -80,9 +80,10 @@ enum ActiveSheet: Identifiable, Equatable {
 final class AppModel {
     let store: Store
     @ObservationIgnored let persistence: FilePersistence
-    @ObservationIgnored let cloud: CloudSync
-    @ObservationIgnored let shares: ShareService
-    @ObservationIgnored let pings: PingService
+    let auth: AuthService
+    @ObservationIgnored let sync: FirebaseSync
+    @ObservationIgnored let social: SocialService
+    @ObservationIgnored let push: PushService
     @ObservationIgnored let notifications: NotificationManager
     @ObservationIgnored let location: LocationService
     @ObservationIgnored let liveActivity = PoopingLiveActivityCoordinator()
@@ -101,17 +102,11 @@ final class AppModel {
     var isForeground = true
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
-    @ObservationIgnored private var sendTask: Task<Void, Never>?
-    @ObservationIgnored var processing = false
-    /// True while "Delete all my data" runs (so our own zone deletions aren't treated as remote ones).
-    @ObservationIgnored var isDeletingAll = false
-    @ObservationIgnored private var pollTasks: [String: Task<Void, Never>] = [:]
-    /// How many visible screens want each zone polled (panels can overlap during transitions).
-    @ObservationIgnored private var pollRefs: [String: Int] = [:]
-    @ObservationIgnored private var pollIntervals: [String: Double] = [:]
     @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var didFinishInitialStart = false
+    /// True while "Delete all my data" runs.
+    @ObservationIgnored var isDeletingAll = false
     /// "is pooping" alerts wait out the Undo window, so a mis-tap never reaches anyone.
     @ObservationIgnored private var pendingPoopPings: [UUID: PingIntent] = [:]
     @ObservationIgnored private var lastPoopPingAt: Date?
@@ -119,7 +114,7 @@ final class AppModel {
     static let poopPingCooldown: TimeInterval = 120
 
     init() {
-        let dir = CloudConfig.localDirectory
+        let dir = FirebaseConfig.localDirectory
         let filePersistence = FilePersistence(directory: dir)
         persistence = filePersistence
         var localMy = filePersistence.loadMy()
@@ -129,9 +124,10 @@ final class AppModel {
             localMy.settings.attachLocationByDefault = true
         }
         store = Store(my: localMy, cache: filePersistence.loadCache())
-        cloud = CloudSync(store: store, directory: dir)
-        shares = ShareService(cloud: cloud, store: store)
-        pings = PingService(store: store, directory: dir)
+        auth = AuthService()
+        sync = FirebaseSync(store: store, directory: dir)
+        social = SocialService(store: store)
+        push = PushService(store: store)
         notifications = NotificationManager()
         location = LocationService()
 
@@ -141,9 +137,10 @@ final class AppModel {
             self.liveActivity.sync(event: event, cosmetic: self.store.profile.equippedCosmetic, privateMode: self.store.settings.lockScreenPrivate)
         }
         store.effectHandler = { [weak self] effect in self?.handle(effect) }
-        cloud.onAvailabilityChange = { [weak self] a in self?.availability = a }
-        cloud.onRemoteChangesApplied = { [weak self] in self?.pings.writeDirectory() }
-        cloud.onMyDataDeletedRemotely = { [weak self] in self?.wipeAfterRemoteDeletion() }
+        sync.onAvailabilityChange = { [weak self] a in self?.availability = a }
+        sync.onRemoteChangesApplied = { [weak self] in self?.remoteChangesApplied() }
+        sync.onEvent = { [weak self] e in self?.handle(syncEvent: e) }
+        auth.onChange = { [weak self] state in self?.authChanged(state) }
     }
 
     // MARK: - Lifecycle
@@ -164,35 +161,98 @@ final class AppModel {
     private func performStart() async {
         notifications.registerCategories()
         await notifications.refreshAuthorization()
-        // Always register: iCloud sync relies on silent pushes, which need no alert permission.
+        // Always register: alerts arrive through APNs/FCM; the token itself needs no alert permission.
         UIApplication.shared.registerForRemoteNotifications()
-        await cloud.start()
-        afterCloudStart()
-    }
-
-    private func afterCloudStart(scheduleInitialRefresh: Bool = true) {
-        guard availability.isAvailable else { return }
-        pings.writeDirectory()
-        // Cached state paints Home immediately.  Stagger network/subscription work so MapKit gets
-        // a clean first second instead of receiving several MainActor-heavy CloudKit callbacks at once.
-        Task {
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            guard !Task.isCancelled else { return }
-            await pings.refreshSubscriptions(force: false)
-        }
-        if scheduleInitialRefresh { scheduleRefresh(afterNanoseconds: 1_250_000_000) }
+        FirebaseConfig.configure()
+        push.start()
+        push.writeDirectory()
+        auth.start()
+        if !FirebaseConfig.isConfigured { availability = .notConfigured }
         notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
         for p in store.parties() where store.myRSVP(p)?.response != .no { notifications.scheduleParty(p, settings: store.settings) }
-
-        #if DEBUG
-        // CKShare's system record type is only born after a real share is saved in Development.
-        // Doing this automatically in debug makes the one-time Production schema deployment much harder to miss.
-        Task { await shares.bootstrapDevelopmentSharingSchema() }
-        #endif
     }
 
-    /// Coalesces launch/foreground refreshes. SwiftUI can report `.active` while initial startup is still
-    /// in flight; without this gate the app could start two full CloudKit fetches during cold launch.
+    /// Firebase Auth reported who is signed in (or that nobody is).
+    private func authChanged(_ state: AuthService.State) {
+        switch state {
+        case .unknown:
+            break
+        case .signedOut:
+            sync.stop()
+            social.setUser(nil)
+            push.setUser(nil)
+            availability = FirebaseConfig.isConfigured ? .noAccount : .notConfigured
+        case .signedIn(let uid, _):
+            if let known = store.userID, known != UserID.localMe, known != uid {
+                // A different account than the data on this device: start clean (the account's own
+                // data streams back in through the listeners).
+                log.info("account switched; resetting local state")
+                sync.stop()
+                store.resetForAccountChange(keepOnboarding: false)
+                sync.resetLocalSyncState()
+                persistence.wipe()
+                UserDefaults.standard.removeObject(forKey: "sf.initialUploadDone")
+            }
+            store.setUserID(uid)
+            social.setUser(uid)
+            push.setUser(uid)
+            sync.start(uid: uid)
+            if !UserDefaults.standard.bool(forKey: "sf.initialUploadDone") {
+                uploadEverythingMine()
+                UserDefaults.standard.set(true, forKey: "sf.initialUploadDone")
+            }
+            Task { await social.syncBlocks(Set(store.settings.blockedUserIDs)) }
+            scheduleRefresh(afterNanoseconds: 1_000_000_000)
+        }
+    }
+
+    /// Queue every record I own (first sign-in, or after a reset): local-only history goes up.
+    private func uploadEverythingMine() {
+        let my = store.my
+        var refs: [RecordRef] = []
+        if my.profile != nil { refs.append(.profile) }
+        refs += my.events.keys.map { .event($0) }
+        refs += my.achievements.keys.map { .achievement($0) }
+        refs += my.cosmetics.keys.map { .cosmetic($0) }
+        refs.append(.settings)
+        refs += my.friendLinks.keys.map { .friendLink($0) }
+        refs += my.groupLinks.keys.map { .groupLink($0) }
+        refs += my.invites.keys.map { .invite($0) }
+        refs += my.spaceLinks.keys.map { .spaceLink($0) }
+        for ref in refs { sync.save(ref) }
+    }
+
+    private func remoteChangesApplied() {
+        // Parties may have just arrived: (re)schedule their reminders; groups may have changed.
+        for p in store.parties() where store.myRSVP(p)?.response != .no { notifications.scheduleParty(p, settings: store.settings) }
+    }
+
+    private func handle(syncEvent e: FirebaseSync.Event) {
+        switch e {
+        case .friendRequest(let req):
+            show(Toast(style: .social, title: "FRIEND REQUEST", body: "@\(req.person.handle) wants to be shitty friends."))
+        case .friendshipConfirmed(let uid, let person):
+            let handle = person?.handle ?? store.person(for: uid)?.handle ?? "friend"
+            show(Toast(style: .social, title: "SHITTY FRIENDS", body: "You and @\(handle) can see each other's history now."))
+        case .friendshipEnded:
+            break
+        case .requestDeclined(let uid):
+            let handle = uid.flatMap { store.person(for: $0)?.handle } ?? "They"
+            info("NOT THIS TIME", "\(handle == "They" ? "They" : "@" + handle) didn't accept. No hard feelings.")
+        case .groupApproved(let gid):
+            let name = store.my.groupLinks[gid]?.nameCache ?? "the group"
+            show(Toast(style: .social, title: "YOU'RE IN \(name.uppercased())", body: "Group activity only. Full history stays between friends."))
+            notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
+        case .groupRequestEnded(let gid):
+            _ = gid
+            info("NOT LET IN", "The owner didn't approve your request.")
+        case .removedFromGroup:
+            info("GROUP GONE", "You were removed, or the owner deleted it.")
+            notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
+        }
+    }
+
+    /// Coalesces launch/foreground refreshes.
     private func scheduleRefresh(afterNanoseconds delay: UInt64 = 0) {
         guard refreshTask == nil else { return }
         refreshTask = Task { [weak self] in
@@ -204,31 +264,14 @@ final class AppModel {
         }
     }
 
-    /// Foreground / pull-to-refresh: fetch everything, process pings, clean up.
+    /// Foreground / pull-to-refresh: flush writes, re-check listeners, clean up.
     func refresh() async {
-        if !availability.isAvailable {
-            // Not signed in earlier (or iCloud was busy): try again, then continue this same refresh.
-            await cloud.start()
-            afterCloudStart(scheduleInitialRefresh: false)
-            guard availability.isAvailable else { return }
-        }
-        pings.cleanupExpired()
         cleanupSpaces()
-        await cloud.fetchAll()
+        sync.sendAll()
+        sync.refreshListeners()
         store.repairMyGroupRecords()
         // Groups may have been created, joined or left: keep per-group highlight alerts current.
         notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
-        await processIncomingPings()
-        await reconcileHistoryShareIfDue()
-    }
-
-    /// At most every 10 minutes: make sure only current friends can read my history.
-    private func reconcileHistoryShareIfDue() async {
-        let key = "sf.historyShareReconciledAt"
-        if let last = UserDefaults.standard.object(forKey: key) as? Date, Date().timeIntervalSince(last) < 600 { return }
-        let allowed = Set(store.my.friendLinks.values.compactMap(\.userID))
-        await shares.reconcileHistoryShare(allowed: allowed)
-        UserDefaults.standard.set(Date(), forKey: key)
     }
 
     func enteredForeground() {
@@ -243,7 +286,7 @@ final class AppModel {
         // iOS may suspend us before the Undo window ends; send what's still valid now.
         flushAllPoopPings()
         saveNow()
-        Task { await cloud.sendAll() }
+        sync.sendAll()
     }
 
     // MARK: - Persistence
@@ -264,17 +307,6 @@ final class AppModel {
         } catch {
             log.error("save failed: \(error.localizedDescription, privacy: .public)")
         }
-        cloud.metadata.flush()
-    }
-
-    /// Pushes queued CloudKit changes soon (live sessions feel snappier than the engine's default batching).
-    private func scheduleSend() {
-        sendTask?.cancel()
-        sendTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled else { return }
-            await self?.cloud.sendAll()
-        }
     }
 
     // MARK: - Effects
@@ -282,20 +314,15 @@ final class AppModel {
     private func handle(_ effect: Effect) {
         switch effect {
         case .save(let ref):
-            cloud.save(ref)
-            scheduleSend()
+            sync.save(ref)
         case .delete(let ref):
-            cloud.delete(ref)
-            if case .invite(let token) = ref { Task { await shares.deleteInviteCard(token: token) } }
-            scheduleSend()
+            sync.delete(ref)
         case .ping(let intent):
-            if case .poop(let eventID, _) = intent {
-                queuePoopPing(intent, eventID: eventID)
-            } else {
-                pings.send(intent)
-            }
+            // Poop With Me / party invites and joins are pushed by the server when their records
+            // land; only "is pooping" waits for the Undo window here.
+            if case .poop(let eventID, _) = intent { queuePoopPing(intent, eventID: eventID) }
         case .cancelPings(let eventID):
-            pings.cancel(eventID: eventID)
+            pendingPoopPings[eventID] = nil
         case .scheduleLongSessionReminder(let id, let at):
             notifications.scheduleLongSessionReminder(eventID: id, at: at, settings: store.settings)
         case .cancelLongSessionReminder(let id):
@@ -333,9 +360,10 @@ final class AppModel {
                 }
             }
         case .refreshSubscriptions:
-            pings.scheduleSubscriptionRefresh()
+            sync.refreshListeners()
         case .refreshDirectory:
-            pings.writeDirectory()
+            push.writeDirectory()
+            Task { await social.syncBlocks(Set(store.settings.blockedUserIDs)) }
         case .rescheduleSummaries:
             notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
         case .achievementsUnlocked(let ids):
@@ -348,9 +376,9 @@ final class AppModel {
         case .cosmeticUnlocked(let id):
             show(Toast(style: .cosmetic(id), title: id.displayName.uppercased(), body: id.tagline))
         case .friendZoneGone(let uid):
-            Task { await shares.unshareMyHistory(from: uid) }
+            Task { await social.unfriend(uid) }
         case .ensureZone(let zone):
-            cloud.ensureZone(zone)
+            sync.ensureZone(zone)
         case .haptic(let kind):
             Haptics.play(kind)
         }
@@ -375,7 +403,7 @@ final class AppModel {
         let now = Date()
         if let last = lastPoopPingAt, now.timeIntervalSince(last) < AppModel.poopPingCooldown { return }
         lastPoopPingAt = now
-        pings.send(intent)
+        sync.announce(eventID: eventID)
     }
 
     private func flushAllPoopPings() {
@@ -421,24 +449,14 @@ final class AppModel {
         show(Toast(style: .error, title: title, body: userFacingErrorMessage(error)))
     }
 
-    /// Never expose CKRecord IDs, zone names, server schema strings, or other CloudKit internals in UI.
+    /// Never expose record ids, paths or server internals in the UI.
     func userFacingErrorMessage(_ error: Error) -> String {
-        if let shareError = error as? ShareService.ShareError {
-            return shareError.errorDescription ?? "iCloud couldn't finish that. Try again."
-        }
-        if let socialError = error as? SocialError {
-            return socialError.errorDescription ?? "That didn't work. Try again."
-        }
-        if let ckError = error as? CKError {
-            switch ckError.code {
-            case .notAuthenticated:
-                return "Sign in to iCloud and try again."
-            case .networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited, .zoneBusy:
-                return "iCloud is temporarily unavailable. Try again in a moment."
-            default:
-                log.error("CloudKit operation failed: \(ckError.localizedDescription, privacy: .public)")
-                return "iCloud couldn't finish that. Try again later."
-            }
+        if let e = error as? SocialService.SocialError { return e.errorDescription ?? "That didn't work. Try again." }
+        if let e = error as? AuthService.AuthError { return e.errorDescription ?? "Sign-in didn't work. Try again." }
+        if let e = error as? SocialActionError { return e.errorDescription ?? "That didn't work. Try again." }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            return "No connection right now. Try again in a moment."
         }
         if let localized = error as? LocalizedError, let message = localized.errorDescription, !message.isEmpty {
             return message
@@ -447,45 +465,12 @@ final class AppModel {
         return "Something went wrong. Try again."
     }
 
-    // MARK: - Live polling (only while a social screen is visible)
+    // MARK: - Live polling
 
-    /// Reference-counted: every start must be balanced by a stop. The fastest requested interval wins.
-    func startPolling(_ zone: ZoneRef, every seconds: Double = 4) {
-        let key = zone.description
-        pollRefs[key, default: 0] += 1
-        let interval = min(seconds, pollIntervals[key] ?? seconds)
-        if pollTasks[key] != nil, interval == pollIntervals[key] { return }
-        pollTasks[key]?.cancel()
-        pollIntervals[key] = interval
-        pollTasks[key] = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.cloud.fetch(zone: zone)
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-            }
-        }
-    }
-
-    func stopPolling(_ zone: ZoneRef) {
-        let key = zone.description
-        let remaining = max(0, (pollRefs[key] ?? 0) - 1)
-        pollRefs[key] = remaining == 0 ? nil : remaining
-        guard remaining == 0 else { return }
-        pollTasks.removeValue(forKey: key)?.cancel()
-        pollIntervals[key] = nil
-    }
-
-    /// Friends' presence while HOME is visible.
-    func startPresencePolling() {
-        guard pollTasks["presence"] == nil else { return }
-        pollTasks["presence"] = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
-                await self?.cloud.fetchShared()
-            }
-        }
-    }
-
-    func stopPresencePolling() {
-        pollTasks.removeValue(forKey: "presence")?.cancel()
-    }
+    /// Group / session records arrive through live listeners now; these stay as no-ops so screens
+    /// keep their appear/disappear hooks (a one-shot fetch covers the notification-tap case).
+    func startPolling(_ zone: ZoneRef, every seconds: Double = 4) {}
+    func stopPolling(_ zone: ZoneRef) {}
+    func startPresencePolling() {}
+    func stopPresencePolling() {}
 }

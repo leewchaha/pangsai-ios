@@ -136,14 +136,18 @@ struct SectionTitle: View {
                 .foregroundStyle(Palette.ink)
             Spacer()
             if let trailing, let action {
-                Button(trailing, action: action)
-                    .font(.heading(11))
-                    .foregroundStyle(Palette.ink)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(Palette.paper2))
-                    .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
-                    .buttonStyle(PressableStyle())
+                Button(action: action) {
+                    Text(trailing)
+                        .font(.heading(11))
+                        .foregroundStyle(Palette.ink)
+                        .padding(.horizontal, 10)
+                        .frame(minHeight: 32)
+                        .background(Capsule().fill(Palette.paper2))
+                        .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(PressableStyle())
+                .accessibilityLabel("\(trailing), \(text)")
             }
         }
     }
@@ -238,10 +242,12 @@ struct TimerText: View {
 struct BlobBackground: View {
     var colors: [Color] = [Palette.sun, Palette.pink, Palette.blue]
     var intensity: Double = 0.08
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 8)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
+        // Reduce Motion: one still frame instead of a slowly drifting glow.
+        TimelineView(.animation(minimumInterval: 1 / 8, paused: reduceMotion)) { context in
+            let t = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate
             Canvas { ctx, size in
                 ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Palette.paper))
                 for (i, c) in colors.prefix(3).enumerated() {

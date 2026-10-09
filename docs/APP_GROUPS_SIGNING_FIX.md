@@ -1,3 +1,5 @@
+> **2026-10-09:** the app no longer uses iCloud/CloudKit. The app target's entitlements are App Groups, Push Notifications and **Sign in with Apple** (`com.apple.developer.applesignin`); `scripts/verify_signing_profiles.py` checks those. Where this document says CloudKit, read Sign in with Apple.
+
 # App Groups provisioning failure (NotificationService) — 2026-10-07
 
 ## Reported error

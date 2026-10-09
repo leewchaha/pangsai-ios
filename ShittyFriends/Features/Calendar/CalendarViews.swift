@@ -216,6 +216,7 @@ struct CalendarMetric: View {
             }
         }
         .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -325,7 +326,8 @@ struct EventRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Text("💩").font(.system(size: 28))
+            // Same faceless 3D poop as the day cells and the map, never the emoji.
+            Object3DImage(subject: .poop(.classic), size: 32)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(event.startedAt.shortTime).font(.heading(17))
@@ -352,6 +354,8 @@ struct EventRow: View {
                 }
                 if event.source == .manual {
                     Text("added later").font(.ui(12, .medium)).foregroundStyle(Palette.muted)
+                } else if event.imported {
+                    Text("imported").font(.ui(12, .medium)).foregroundStyle(Palette.muted)
                 } else if event.manuallyAdjusted {
                     Text("edited").font(.ui(12, .medium)).foregroundStyle(Palette.muted)
                 }
@@ -364,6 +368,7 @@ struct EventRow: View {
         }
         .padding(12)
         .calmSurface(Palette.card, radius: 16)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -407,6 +412,11 @@ struct EventEditorView: View {
                         Text("This timer ran unusually long. Forgot to tap DONE? Fix the end time — nothing gets deleted.")
                             .font(.footnote)
                             .foregroundStyle(.orange)
+                    }
+                    if event.countsForRanking {
+                        Text("Changing the start time, or the pin's position, keeps this poop in your history and stats but takes it out of leaderboards, trophies and achievements.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 Section("WHERE") {

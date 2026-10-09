@@ -1,11 +1,12 @@
 import Foundation
 
 public extension Store {
-    /// Applies records fetched from CloudKit (my other devices, friends' zones, groups, sessions).
+    /// Applies records that arrived from the server (my other devices, friends' histories, groups, sessions).
     func apply(_ changes: [RemoteChange]) {
         guard !changes.isEmpty else { return }
         var effects: [Effect] = []
         var touchedSessions: [(ZoneRef, UUID)] = []
+        var touchedParties: [(ZoneRef, UUID)] = []
         var linksChanged = false
         var directoryChanged = false
 
@@ -30,6 +31,7 @@ public extension Store {
                 } else {
                     let r = applyZone(record, zone: zone)
                     if let s = r.session { touchedSessions.append((zone, s)) }
+                    if let p = r.party { touchedParties.append((zone, p)) }
                     directoryChanged = directoryChanged || r.directory
                     effects += r.effects
                 }
@@ -45,6 +47,7 @@ public extension Store {
             confirmSocialSession(zone: zone, sessionID: sid)
             effects += maybeEndSession(zone: zone, sessionID: sid)
         }
+        for (zone, pid) in touchedParties { confirmSocialParty(zone: zone, partyID: pid) }
         if linksChanged || directoryChanged { effects += [.refreshSubscriptions, .refreshDirectory] }
         emit(effects)
         evaluateAchievements()
@@ -93,8 +96,21 @@ public extension Store {
         case .cosmetic(let c):
             mutateMy { $0.cosmetics[c.id] = c }
         case .settings(let s):
-            if my.settings.updatedAt <= s.updatedAt { mutateMy { $0.settings = s }; return true }
+            if my.settings.updatedAt <= s.updatedAt {
+                let newlyBlocked = Set(s.blockedUserIDs).subtracting(my.settings.blockedUserIDs)
+                mutateMy { $0.settings = s }
+                // A block made on another device drops the friend here too.
+                for uid in newlyBlocked {
+                    for link in my.friendLinks.values where link.userID == uid { removeFriendLocal(link.id) }
+                }
+                return true
+            }
         case .friendLink(let l):
+            if let uid = l.userID, isBlocked(uid) {
+                // Blocked here, linked on another device: the block wins everywhere.
+                emit([.delete(.friendLink(l.id))])
+                return false
+            }
             if let local = my.friendLinks[l.id], local.updatedAt > l.updatedAt { return false }
             mutateMy { $0.friendLinks[l.id] = l }
             return true
@@ -117,6 +133,7 @@ public extension Store {
     // MARK: - Friends' Me zones
 
     private func applyFriend(_ record: RemoteRecord, ownerID: UserID, zone: ZoneRef) {
+        guard !isBlocked(ownerID) else { return } // their share may linger; never cache it
         mutateCache { c in
             var fc = c.friends[ownerID] ?? FriendCache(userID: ownerID, zone: zone)
             switch record {
@@ -162,6 +179,8 @@ public extension Store {
         case .member(let m):
             if m.role == .owner && m.id != owner { return false }
             return writer == m.id || writer == owner
+        case .joinRequest(let r):
+            return writer == r.id
         case .groupEvent(let e):
             return writer == e.ownerID
         case .reaction(let r):
@@ -199,6 +218,8 @@ public extension Store {
             return zone.isMine && z?.group != nil ? [.save(.groupInfo(zone))] : []
         case .member(let m) where m.id == uid:
             return z?.members[uid] != nil ? [.save(.member(zone, uid))] : []
+        case .joinRequest:
+            return []
         case .groupEvent(let e) where e.ownerID == uid:
             return z?.events[e.id] != nil ? [.save(.groupEvent(zone, e.id))] : [.delete(.groupEvent(zone, e.id))]
         case .reaction(let r) where r.senderID == uid:
@@ -224,11 +245,13 @@ public extension Store {
     func repairMyGroupRecords() {
         guard let uid = my.userID else { return }
         var effects: [Effect] = []
-        for link in my.groupLinks.values {
+        for link in my.groupLinks.values where link.status == .active {
             guard let z = cache.zones[link.zone], z.group != nil else { continue }
             if z.members[uid] == nil {
+                // Only my own row's *contents* are mine to write; the row itself is created by the
+                // server on approval (or by me as the owner). Re-saving is harmless either way.
                 let role: GroupRole = link.isOwner ? .owner : .member
-                let member = GroupMember(person: meRef, inbox: link.myInbox, role: role, joinedAt: link.joinedAt, updatedAt: clock())
+                let member = GroupMember(person: meRef, role: role, joinedAt: link.joinedAt, updatedAt: clock())
                 mutateCache { $0.zones[link.zone]?.members[uid] = member }
                 effects.append(.save(.member(link.zone, uid)))
             }
@@ -244,8 +267,9 @@ public extension Store {
 
     // MARK: - Group / session zones
 
-    private func applyZone(_ record: RemoteRecord, zone: ZoneRef) -> (session: UUID?, directory: Bool, effects: [Effect]) {
+    private func applyZone(_ record: RemoteRecord, zone: ZoneRef) -> (session: UUID?, party: UUID?, directory: Bool, effects: [Effect]) {
         var session: UUID?
+        var party: UUID?
         var directory = false
         var effects: [Effect] = []
         let uid = my.userID
@@ -262,6 +286,14 @@ public extension Store {
             // Never let a stale copy of my own member record overwrite my local one.
             if m.id == uid, let local = z.members[m.id], local.updatedAt > m.updatedAt { break }
             z.members[m.id] = m
+            directory = true
+            if m.id == uid, let gid = zone.groupID, my.groupLinks[gid]?.status == .requested {
+                mutateCache { $0.zones[zone] = z }
+                groupApproved(gid, joinedAt: m.joinedAt)
+                z = cache.zones[zone] ?? z
+            }
+        case .joinRequest(let r):
+            z.requests[r.id] = r
             directory = true
         case .groupEvent(let e):
             if e.ownerID == uid, let local = z.events[e.id], local.updatedAt > e.updatedAt { break }
@@ -286,12 +318,13 @@ public extension Store {
         case .rsvp(let r):
             if r.id == uid, let local = z.rsvps[r.partyID]?[r.id], local.updatedAt > r.updatedAt { break }
             z.rsvps[r.partyID, default: [:]][r.id] = r
+            party = r.partyID
         default:
             break
         }
         let updated = z
         mutateCache { $0.zones[zone] = updated }
-        return (session, directory, effects)
+        return (session, party, directory, effects)
     }
 
     // MARK: - Deletes
@@ -325,8 +358,10 @@ public extension Store {
         case .invite(let t):
             mutateMy { $0.invites[t] = nil }
             return true
-        case .spaceLink(let z): mutateMy { $0.spaceLinks[z] = nil }
+        case .spaceLink(let z):
+            mutateMy { m in for k in m.spaceLinks.keys where k == z || (k.spaceID != nil && k.spaceID == z.spaceID) { m.spaceLinks[k] = nil } }
         case .member(let z, let uid): mutateCache { $0.zones[z]?.members[uid] = nil }
+        case .joinRequest(let z, let uid): mutateCache { $0.zones[z]?.requests[uid] = nil }
         case .groupEvent(let z, let id): mutateCache { $0.zones[z]?.events[id] = nil }
         case .pwmSession(let z, let id): mutateCache { $0.zones[z]?.sessions[id] = nil }
         case .participant(let z, let sid, let uid): mutateCache { $0.zones[z]?.participants[sid]?[uid] = nil }

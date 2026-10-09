@@ -359,6 +359,7 @@ struct FriendCloud: View {
 
 struct FriendBubble: View {
     var summary: FriendSummary
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pulse = false
     @State private var bounce = false
 
@@ -369,9 +370,9 @@ struct FriendBubble: View {
                     Circle()
                         .stroke(summary.person.color.color, lineWidth: 4)
                         .frame(width: 64, height: 64)
-                        .scaleEffect(pulse ? 1.08 : 1)
-                        .opacity(pulse ? 0.45 : 1)
-                        .animation(.easeInOut(duration: 1.05).repeatForever(autoreverses: true), value: pulse)
+                        .scaleEffect(pulse && !reduceMotion ? 1.08 : 1)
+                        .opacity(pulse && !reduceMotion ? 0.45 : 1)
+                        .animation(reduceMotion ? .default : .easeInOut(duration: 1.05).repeatForever(autoreverses: true), value: pulse)
                 }
                 AvatarView(person: summary.person, size: 56)
                 if summary.live != nil {
@@ -454,6 +455,7 @@ struct InviteCard: View {
                 .padding(.vertical, 9)
                 .background(Capsule().fill(Palette.ink))
                 .buttonStyle(PressableStyle())
+                .accessibilityLabel("\(action): \(title)")
         }
         .padding(10)
         .calmSurface(Palette.card, radius: 18)
@@ -505,6 +507,7 @@ struct UndoBar: View {
 struct FlyingPoops: View {
     var trigger: Int
     var cosmetic: CosmeticID
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var bursts: [Burst] = []
 
     struct Burst: Identifiable {
@@ -526,6 +529,7 @@ struct FlyingPoops: View {
             }
         }
         .onChange(of: trigger) { _, _ in
+            guard !reduceMotion else { return }
             let new = (0..<5).map { _ in Burst(x: CGFloat.random(in: -150...150), rotation: Double.random(in: -240...240)) }
             bursts.append(contentsOf: new)
             let ids = Set(new.map(\.id))

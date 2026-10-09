@@ -236,6 +236,7 @@ struct ParticipantTile: View {
             }
             .foregroundStyle(Palette.inkFixed)
         }
+        .accessibilityElement(children: .combine)
     }
 }
 

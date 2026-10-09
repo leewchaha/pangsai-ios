@@ -10,7 +10,7 @@ final class ExportAndMeshTests: XCTestCase {
         store.finish()
         store.attachLocation(PoopLocation(latitude: 36.7, longitude: 137.2, placeName: "Home, sweet \"home\"", locality: "Toyama", country: "Japan", countryCode: "JP"), to: e.id)
         store.addManual(at: clock.now.addingTimeInterval(-7200), duration: nil, location: nil)
-        let link = FriendLink(userID: "_sam", person: PersonRef(id: "_sam", handle: "sam", avatar: AvatarSpec(), color: .sky), status: .active, myInbox: "SECRET_INBOX", theirInbox: "SECRET_THEIRS", pairKey: "SECRET_PAIRKEY")
+        let link = FriendLink(userID: "_sam", person: PersonRef(id: "_sam", handle: "sam", avatar: AvatarSpec(), color: .sky), status: .active, requestID: "SECRET_REQUEST")
         store.upsertFriendLink(link)
         _ = store.currentInvite()
 
@@ -20,8 +20,8 @@ final class ExportAndMeshTests: XCTestCase {
             XCTAssertTrue(names.contains(required), required)
         }
         let all = files.map { String(decoding: $0.data, as: UTF8.self) }.joined()
-        XCTAssertFalse(all.contains("SECRET"), "export must not leak tokens or keys")
-        XCTAssertFalse(all.contains(store.my.invites.values.first!.secret))
+        XCTAssertFalse(all.contains("SECRET"), "export must not leak tokens or request ids")
+        XCTAssertFalse(all.contains(store.my.invites.values.first!.token))
 
         let csv = String(decoding: files.first { $0.name == "poop-history.csv" }!.data, as: UTF8.self)
         XCTAssertTrue(csv.contains("\"Home, sweet \"\"home\"\"\""), "CSV escaping")

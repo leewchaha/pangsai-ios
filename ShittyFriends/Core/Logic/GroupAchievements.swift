@@ -26,7 +26,7 @@ public enum GroupAchievementID: String, CaseIterable, Sendable, Identifiable, Ha
         case .tagTeam: return "A Poop With Me with three or more people actually pooping."
         case .partyOn: return "A Poop Party that three or more of you joined."
         case .nightShiftCrew: return "Three of you logged between midnight and 4:00 on the same night."
-        case .internationalIncident: return "Logs shared here from two different countries."
+        case .internationalIncident: return "Two of you logged from two different countries (with locations shared here)."
         }
     }
 
@@ -54,13 +54,15 @@ public enum GroupAchievementEngine {
     public static let minimumCrew = 3
 
     public static func evaluate(
-        events: [GroupEvent],
+        events allEvents: [GroupEvent],
         members: [GroupMember],
         sessionParticipants: [[PWMParticipant]],
         partyRSVPs: [[PartyRSVP]],
         calendar: Calendar
     ) -> [GroupAchievementStatus] {
-        GroupAchievementID.allCases.map { id in
+        // Only live-logged poops; manual, edited and imported copies never earn a trophy.
+        let events = allEvents.filter { $0.countsForRanking }
+        return GroupAchievementID.allCases.map { id in
             let at: Date?
             switch id {
             case .fullHouse: at = fullHouse(events, members: members, calendar: calendar)
@@ -135,12 +137,17 @@ public enum GroupAchievementEngine {
         return nil
     }
 
+    /// Two *different members* in two different countries. One person's holiday abroad doesn't make
+    /// an incident; the group earns this together, like every other trophy here.
     static func international(_ events: [GroupEvent]) -> Date? {
-        var seen = Set<String>()
+        var countryByPerson: [UserID: Set<String>] = [:]
         for e in events.sorted(by: { $0.startedAt < $1.startedAt }) {
             guard let code = (e.location?.countryCode ?? e.location?.country)?.uppercased(), !code.isEmpty else { continue }
-            seen.insert(code)
-            if seen.count >= 2 { return e.startedAt }
+            countryByPerson[e.ownerID, default: []].insert(code)
+            // Earned the moment some other member has logged from a country this one hasn't.
+            for (other, codes) in countryByPerson where other != e.ownerID {
+                if codes.contains(where: { $0 != code }) { return e.startedAt }
+            }
         }
         return nil
     }
@@ -162,15 +169,15 @@ public extension Store {
     }
 
     /// Me and my friends ranked for a period (handoff §18 "individual friend comparisons").
-    /// Highest first; ties by handle.
+    /// Highest first; ties by handle. Live-logged poops only (`countsForRanking`).
     func friendLeaderboard(period: HighlightPeriod = .week, now: Date? = nil) -> [(person: PersonRef, count: Int)] {
         let interval = period.interval(containing: now ?? clock(), calendar: calendar)
-        var rows: [(person: PersonRef, count: Int)] = [(meRef, my.events.values.filter { interval.contains($0.startedAt) }.count)]
+        var rows: [(person: PersonRef, count: Int)] = [(meRef, my.events.values.filter { $0.countsForRanking && interval.contains($0.startedAt) }.count)]
         for link in activeFriendLinks {
             guard let uid = link.userID else { continue }
             let fc = cache.friends[uid]
             let person = fc?.profile.map { PersonRef(id: uid, profile: $0) } ?? link.person ?? PersonRef(id: uid, handle: "friend", avatar: AvatarSpec(), color: IdentityColor.stable(for: uid))
-            let count = fc?.events.values.filter { interval.contains($0.startedAt) }.count ?? 0
+            let count = fc?.events.values.filter { $0.countsForRanking && interval.contains($0.startedAt) }.count ?? 0
             rows.append((person, count))
         }
         return rows.sorted { $0.count != $1.count ? $0.count > $1.count : $0.person.handle.lowercased() < $1.person.handle.lowercased() }

@@ -1,20 +1,24 @@
 import Foundation
 
 public struct AchievementContext {
+    /// Live-logged poops only (see `PoopLike.countsForRanking`).
     public var events: [PoopEvent]
     public var friendCount: Int
     /// Poop With Me sessions that had at least two people actually pooping (me included).
     public var completedSocialSessions: Int
-    /// Parties I RSVP'd yes to whose time has passed, and whether I joined them.
+    /// Poop Parties I joined that at least one other person also joined.
+    public var socialParties: Int
+    /// Parties I RSVP'd yes to whose time has passed (and somebody else turned up to), and whether I joined them.
     public var pastYesParties: [(partyID: UUID, scheduledAt: Date, joined: Bool)]
     public var ownedCosmetics: Int
     public var now: Date
     public var calendar: Calendar
 
-    public init(events: [PoopEvent], friendCount: Int, completedSocialSessions: Int, pastYesParties: [(partyID: UUID, scheduledAt: Date, joined: Bool)], ownedCosmetics: Int, now: Date, calendar: Calendar) {
+    public init(events: [PoopEvent], friendCount: Int, completedSocialSessions: Int, socialParties: Int, pastYesParties: [(partyID: UUID, scheduledAt: Date, joined: Bool)], ownedCosmetics: Int, now: Date, calendar: Calendar) {
         self.events = events
         self.friendCount = friendCount
         self.completedSocialSessions = completedSocialSessions
+        self.socialParties = socialParties
         self.pastYesParties = pastYesParties
         self.ownedCosmetics = ownedCosmetics
         self.now = now
@@ -64,7 +68,7 @@ public enum AchievementEngine {
         case .poopPals:
             return ctx.completedSocialSessions >= 10 ? [:] : nil
         case .partyAnimal:
-            return Set(events.compactMap { $0.partyID }).count >= 3 ? [:] : nil
+            return ctx.socialParties >= 3 ? [:] : nil
         case .perfectAttendance:
             let windowStart = ctx.now.addingTimeInterval(-30 * 24 * 3600)
             let recent = ctx.pastYesParties.filter { $0.scheduledAt >= windowStart && $0.scheduledAt <= ctx.now }
@@ -109,7 +113,7 @@ public enum AchievementEngine {
         case .poopPals:
             return AchievementProgress(current: ctx.completedSocialSessions, target: 10)
         case .partyAnimal:
-            return AchievementProgress(current: Set(ctx.events.compactMap { $0.partyID }).count, target: 3)
+            return AchievementProgress(current: ctx.socialParties, target: 3)
         case .traveller:
             return AchievementProgress(current: PlaceClustering.places(ctx.events.compactMap { $0.location }).count, target: 5)
         case .international:

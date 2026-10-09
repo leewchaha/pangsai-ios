@@ -14,14 +14,15 @@ struct OnboardingFlow: View {
     @State private var color = IdentityColor.random()
     @State private var demoPulse = 0
 
-    private let colors: [Color] = [Palette.sun, Palette.aqua, Palette.pink, Palette.lime, Palette.violet, Palette.tangerine]
+    private let colors: [Color] = [Palette.sun, Palette.blue, Palette.aqua, Palette.pink, Palette.lime, Palette.violet, Palette.tangerine]
+    private static let stepCount = 7
 
     var body: some View {
         ZStack {
             colors[min(step, colors.count - 1)].ignoresSafeArea().animation(Motion.soft, value: step)
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
-                    // Back (steps 2–6). The age step is the door, so it has nothing behind it.
+                    // Back (steps 2–7). The age step is the door, so it has nothing behind it.
                     Button {
                         Haptics.tick()
                         step = max(0, step - 1)
@@ -38,20 +39,23 @@ struct OnboardingFlow: View {
                     .accessibilityLabel("Back")
                     .accessibilityHidden(step == 0)
                     HStack(spacing: 6) {
-                        ForEach(0..<6, id: \.self) { i in
+                        ForEach(0..<Self.stepCount, id: \.self) { i in
                             Capsule().fill(i <= step ? Palette.inkFixed : Palette.inkFixed.opacity(0.2)).frame(height: 5)
                         }
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Step \(step + 1) of \(Self.stepCount)")
                 }
                 .gutter()
                 .padding(.top, 10)
                 Group {
                     switch step {
                     case 0: welcome
-                    case 1: identity
-                    case 2: friends
-                    case 3: taps
-                    case 4: notifications
+                    case 1: signIn
+                    case 2: identity
+                    case 3: friends
+                    case 4: taps
+                    case 5: notifications
                     default: location
                     }
                 }
@@ -133,6 +137,13 @@ struct OnboardingFlow: View {
 
     // MARK: 2
 
+    /// Sign in with Apple / Google. Skippable: logging works without an account.
+    private var signIn: some View {
+        SignInView(inOnboarding: true) { next() }
+    }
+
+    // MARK: 3
+
     private var identity: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -156,7 +167,7 @@ struct OnboardingFlow: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
-    // MARK: 3
+    // MARK: 4
 
     private var friends: some View {
         VStack(spacing: 18) {
@@ -170,7 +181,7 @@ struct OnboardingFlow: View {
             Spacer()
             Button("NEXT") { next() }
                 .buttonStyle(.sticker(.white, ink: Palette.inkFixed, height: 62))
-            Button("Skip for now") { next() }
+            Button("SKIP FOR NOW") { next() }
                 .font(.heading(13))
                 .foregroundStyle(Palette.inkFixed)
         }
@@ -178,7 +189,7 @@ struct OnboardingFlow: View {
         .padding(.bottom, 20)
     }
 
-    // MARK: 4
+    // MARK: 5
 
     private var taps: some View {
         VStack(spacing: 22) {
@@ -206,7 +217,7 @@ struct OnboardingFlow: View {
         .padding(.bottom, 20)
     }
 
-    // MARK: 5
+    // MARK: 6
 
     private var notifications: some View {
         VStack(spacing: 18) {
@@ -225,7 +236,7 @@ struct OnboardingFlow: View {
                 }
             }
             .buttonStyle(.sticker(.white, ink: Palette.inkFixed, height: 62))
-            Button("Not now") { next() }
+            Button("NOT NOW") { next() }
                 .font(.heading(13))
                 .foregroundStyle(Palette.inkFixed)
         }
@@ -233,7 +244,7 @@ struct OnboardingFlow: View {
         .padding(.bottom, 20)
     }
 
-    // MARK: 6
+    // MARK: 7
 
     private var location: some View {
         ScrollView {
@@ -292,7 +303,7 @@ struct OnboardingInviteBlock: View {
                     .buttonStyle(.sticker(Palette.sun))
                 }
             } else if failed || !model.availability.isAvailable {
-                Text(model.availability.message ?? "You can invite friends anytime from HOME → 👥.")
+                Text(model.availability.isAvailable ? "You can invite friends anytime from HOME → 👥." : "Sign in first (go back one step, or later in YOU → Settings) to invite friends. You can do this anytime from HOME → 👥.")
                     .font(.ui(14, .semibold))
                     .foregroundStyle(Palette.inkFixed)
                     .multilineTextAlignment(.center)

@@ -1,29 +1,28 @@
-import CloudKit
 import Foundation
 import UIKit
 import os
 
 private let log = Logger(subsystem: "com.sakara.shittyfriends", category: "social")
 
-extension AppModel {
-    enum SocialError: LocalizedError {
-        case needsICloud
-        case noLiveSession
-        case nothingToJoin
-        case badLink
+enum SocialActionError: LocalizedError {
+    case needsSignIn
+    case noLiveSession
+    case nothingToJoin
+    case badLink
 
-        var errorDescription: String? {
-            switch self {
-            case .needsICloud: return "Sign in to iCloud (Settings › your name) to do this. Logging works without it."
-            case .noLiveSession: return "Start pooping first."
-            case .nothingToJoin: return "That session is over."
-            case .badLink: return "That link isn't a ShittyFriends invite."
-            }
+    var errorDescription: String? {
+        switch self {
+        case .needsSignIn: return "Sign in (YOU → Settings) to do this. Logging works without it."
+        case .noLiveSession: return "Start pooping first."
+        case .nothingToJoin: return "That session is over."
+        case .badLink: return "That link isn't a ShittyFriends invite."
         }
     }
+}
 
-    private func requireCloud() throws {
-        guard availability.isAvailable, store.userID != nil else { throw SocialError.needsICloud }
+extension AppModel {
+    private func requireSignIn() throws {
+        guard availability.isAvailable, store.userID != nil, store.userID != UserID.localMe else { throw SocialActionError.needsSignIn }
     }
 
     private func withBusy<T>(_ label: String, _ body: () async throws -> T) async rethrows -> T {
@@ -34,12 +33,11 @@ extension AppModel {
 
     // MARK: - Friend invites (A side)
 
-    /// QR/share payload for my current invite. The invite itself is app data, not a CKShare.
-    /// This avoids creating `cloudkit.share` just to show the Add Friends screen; CloudKit sharing is
-    /// only needed later, after both people explicitly accept and history access is granted.
+    /// QR/share payload for my current invite.
     func friendInviteURL() async throws -> URL {
-        try requireCloud()
+        try requireSignIn()
         let payload = store.friendInvitePayload()
+        sync.sendAll()
         return DeepLinkCodec.friendURL(payload)
     }
 
@@ -47,21 +45,19 @@ extension AppModel {
         DeepLinkCodec.friendShareText(handle: store.profile.handle, url: url)
     }
 
-    /// A taps ACCEPT on a request: share my history with them, then tell them.
+    /// A taps ACCEPT on a request: the friendship record is created; both sides see it come back.
     func acceptFriendRequest(_ request: IncomingFriendRequest) async {
         do {
-            try requireCloud()
+            try requireSignIn()
             try await withBusy("Becoming shitty friends…") {
                 let link = try store.acceptFriendRequest(request.id)
                 guard let uid = link.userID else { return }
-                let url = try await shares.shareMyHistory(with: uid)
-                if let ping = PingPlanner.friendAccept(link: link, shareURL: url, store: store, now: Date()) {
-                    pings.send([ping])
-                }
-                info("REQUEST ACCEPTED", "Waiting for @\(request.person.handle) to finish the handshake.")
+                try await social.acceptFriendRequest(requestID: request.id, from: uid)
             }
         } catch Store.HandshakeError.alreadyFriends {
             info("ALREADY FRIENDS", "@\(request.person.handle) is already a shitty friend.")
+        } catch Store.HandshakeError.blocked {
+            info("BLOCKED", "Unblock @\(request.person.handle) in Settings first.")
         } catch {
             self.error("Couldn't accept", error)
         }
@@ -70,6 +66,7 @@ extension AppModel {
     func declineFriendRequest(_ request: IncomingFriendRequest, block: Bool) {
         store.dismissRequest(request.id)
         if block { store.block(request.person.id) }
+        Task { await social.deleteFriendRequest(request.id) }
     }
 
     // MARK: - Friend invites (B side)
@@ -77,108 +74,68 @@ extension AppModel {
     /// B confirmed "BECOME SHITTY FRIENDS?" on someone's invite.
     func sendFriendRequest(_ invite: FriendInvitePayload) {
         do {
-            try requireCloud()
-            let (_, ping) = try store.beginFriendRequest(invite)
-            pings.send([ping])
-            info("REQUEST SENT", "@\(invite.h) has to accept. Then your histories unlock.")
+            try requireSignIn()
+            let link = try store.beginFriendRequest(invite)
+            Task {
+                do {
+                    let other: UserID
+                    if let u = invite.u { other = u } else { other = try await social.resolveInvite(token: invite.t) }
+                    if other == store.userID {
+                        store.cancelPendingLink(link.id)
+                        info("THAT'S YOU", "You can't befriend yourself. Emotionally, maybe.")
+                        return
+                    }
+                    if store.isBlocked(other) {
+                        store.cancelPendingLink(link.id)
+                        info("BLOCKED", "Unblock them in Settings first.")
+                        return
+                    }
+                    let requestID = try await social.sendFriendRequest(to: other, inviteToken: invite.t)
+                    store.markRequestSent(linkID: link.id, requestID: requestID, userID: other)
+                    info("REQUEST SENT", "@\(invite.h) has to accept. Then your histories unlock.")
+                } catch {
+                    store.cancelPendingLink(link.id)
+                    self.error("Couldn't send request", error)
+                }
+            }
         } catch Store.HandshakeError.ownInvite {
             info("THAT'S YOU", "You can't befriend yourself. Emotionally, maybe.")
+        } catch Store.HandshakeError.alreadyFriends {
+            info("ALREADY FRIENDS", "@\(invite.h) is already a shitty friend.")
+        } catch Store.HandshakeError.blocked {
+            info("BLOCKED", "Unblock @\(invite.h) in Settings first.")
         } catch {
             self.error("Couldn't send request", error)
         }
     }
 
+    /// Cancel a request I sent, or a pending acceptance.
+    func cancelPendingLink(_ link: FriendLink) {
+        let requestID = link.requestID
+        store.cancelPendingLink(link.id)
+        if let requestID { Task { await social.deleteFriendRequest(requestID) } }
+    }
+
     // MARK: - Removing friends
 
-    /// Unfriend: revoke their access to my history and leave theirs. Both sides end up clean.
+    /// Unfriend: the friendship record goes; both sides lose access at once.
     func removeFriend(_ link: FriendLink) async {
         let uid = link.userID
         store.removeFriendLocal(link.id)
         guard let uid else { return }
-        await shares.unshareMyHistory(from: uid)
-        shares.leave(ZoneRef(ownerName: uid, zoneName: ZoneNames.me))
+        await social.unfriend(uid)
     }
 
     func blockFriend(_ link: FriendLink) async {
+        // `block` drops the link and their cached history and emits `.friendZoneGone` (-> unfriend).
         if let uid = link.userID { store.block(uid) }
         await removeFriend(link)
     }
 
-    // MARK: - Incoming pings
-
-    func processIncomingPings() async {
-        guard availability.isAvailable, !processing else { return }
-        processing = true
-        defer { processing = false }
-        let incoming = await pings.fetchIncoming()
-        var needsSharedFetch = false
-        for ping in incoming {
-            let action = pings.process(ping)
-            do {
-                switch action {
-                case .friendRequest(let req):
-                    if store.receiveFriendRequest(req) {
-                        show(Toast(style: .social, title: "FRIEND REQUEST", body: "@\(req.person.handle) wants to be shitty friends."))
-                    }
-                case .friendAccepted(let linkID, let person, let theirInbox, let url):
-                    guard let shareURL = URL(string: url) else { break }
-                    try await shares.accept(url: shareURL)
-                    let myURL = try await shares.shareMyHistory(with: person.id)
-                    try store.completeAsRequester(linkID: linkID, person: person, theirInbox: theirInbox, shareURL: url)
-                    if let link = store.my.friendLinks[linkID], let p = PingPlanner.friendComplete(link: link, shareURL: myURL, store: store, now: Date()) {
-                        pings.send([p])
-                    }
-                    show(Toast(style: .social, title: "SHITTY FRIENDS", body: "You and @\(person.handle) can see each other's history now."))
-                case .friendCompleted(let linkID, let url):
-                    guard let shareURL = URL(string: url) else { break }
-                    try await shares.accept(url: shareURL)
-                    try store.completeAsAccepter(linkID: linkID, shareURL: url)
-                    let handle = store.my.friendLinks[linkID]?.person?.handle ?? "friend"
-                    show(Toast(style: .social, title: "SHITTY FRIENDS", body: "Handshake complete with @\(handle)."))
-                case .pwmInvite(let sessionID, _, let url):
-                    if let url { try await joinSpace(url: url, kind: .pwm, expires: Date().addingTimeInterval(6 * 3600)) }
-                    needsSharedFetch = true
-                    if store.liveEvent == nil, sheet == nil, isForeground { sheet = .pwmInvite(sessionID) }
-                case .partyInvite(_, _, let url):
-                    if let url { try await joinSpace(url: url, kind: .party, expires: Date().addingTimeInterval(8 * 24 * 3600)) }
-                    needsSharedFetch = true
-                case .refreshShared:
-                    needsSharedFetch = true
-                case .ignore(let reason):
-                    log.debug("ignored ping: \(reason, privacy: .public)")
-                }
-                pings.markProcessed(ping)
-            } catch {
-                // Leave unprocessed; it is retried on the next refresh until it expires.
-                log.error("ping \(ping.kind.rawValue, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-        if needsSharedFetch { await cloud.fetchShared() }
-        // Parties may have just arrived: (re)schedule their reminders.
-        for p in store.parties() where store.myRSVP(p)?.response != .no { notifications.scheduleParty(p, settings: store.settings) }
-    }
-
-    /// Accepts an ad-hoc session space shared by a friend and remembers it for cleanup.
-    private func joinSpace(url: String, kind: SpaceKind, expires: Date) async throws {
-        guard let u = URL(string: url) else { return }
-        let accepted = try await shares.accept(url: u)
-        if store.my.spaceLinks[accepted.zone] == nil {
-            store.registerSpace(SpaceLink(zone: accepted.zone, kind: kind, isOwner: false, shareURL: url, participantIDs: [], expiresAt: expires))
-        }
-        await cloud.fetch(zone: accepted.zone)
-    }
-
-    /// Deletes (owner) or leaves (guest) session spaces that are past their expiry.
-    func cleanupSpaces() {
-        for space in store.expiredSpaces() {
-            if space.isOwner { shares.deleteOwned(space.zone) } else { shares.leave(space.zone) }
-            store.removeSpace(space.zone)
-        }
-    }
-
-    // MARK: - Links (URLs, QR codes, system share acceptance)
+    // MARK: - Links (URLs, QR codes, pasted text)
 
     func handle(url: URL) {
+        if auth.handle(url: url) { return }
         guard let link = DeepLinkCodec.parse(url) else {
             info("UNKNOWN LINK", "That isn't a ShittyFriends link.")
             return
@@ -187,9 +144,7 @@ extension AppModel {
         case .friendInvite(let p):
             sheet = .friendInvite(p)
         case .groupInvite(let p):
-            if let u = URL(string: p.u) { offerGroupJoin(GroupJoinOffer(name: p.n, color: p.color, object: p.object, metadata: nil, url: u)) }
-        case .cloudShare(let u):
-            Task { await openCloudShare(url: u) }
+            offerGroupJoin(GroupJoinOffer(name: p.n, color: p.color, object: p.object, code: p.k))
         case .openSession:
             if store.liveEvent != nil { showSession = true }
         case .openParty(let id):
@@ -201,10 +156,8 @@ extension AppModel {
     func handle(text: String) {
         if let link = DeepLinkCodec.find(in: text) {
             switch link {
-            case .cloudShare(let u): Task { await openCloudShare(url: u) }
             case .friendInvite(let p): sheet = .friendInvite(p)
-            case .groupInvite(let p):
-                if let u = URL(string: p.u) { offerGroupJoin(GroupJoinOffer(name: p.n, color: p.color, object: p.object, metadata: nil, url: u)) }
+            case .groupInvite(let p): offerGroupJoin(GroupJoinOffer(name: p.n, color: p.color, object: p.object, code: p.k))
             default: break
             }
         } else {
@@ -212,52 +165,11 @@ extension AppModel {
         }
     }
 
-    func openCloudShare(url: URL) async {
-        do {
-            try requireCloud()
-            let metadata = try await withBusy("Opening invite…") { try await shares.metadataWithRoot(url) }
-            await openCloudShare(metadata: metadata)
-        } catch {
-            self.error("Couldn't open link", error)
-        }
-    }
-
-    /// Called for links the system opened for us (CKSharingSupported) and for pasted/scanned links.
-    func openCloudShare(metadata: CKShare.Metadata) async {
-        let zoneName = metadata.share.recordID.zoneID.zoneName
-        do {
-            try requireCloud()
-            if zoneName == ZoneNames.invites {
-                switch try await shares.readInviteCard(metadata) {
-                case .invite(let p): sheet = .friendInvite(p)
-                case .mine: info("THAT'S YOUR INVITE", "Send it to someone else.")
-                case .notAnInvite: throw SocialError.badLink
-                }
-            } else if zoneName.hasPrefix(ZoneNames.groupPrefix) {
-                let title = metadata.share[CKShare.SystemFieldKey.title] as? String ?? "a group"
-                offerGroupJoin(GroupJoinOffer(name: title, color: .violet, object: .toilet, metadata: metadata, url: metadata.share.url))
-            } else if zoneName.hasPrefix(ZoneNames.sessionPrefix) {
-                let accepted = try await shares.accept(metadata: metadata)
-                if store.my.spaceLinks[accepted.zone] == nil {
-                    store.registerSpace(SpaceLink(zone: accepted.zone, kind: .pwm, isOwner: false, shareURL: metadata.share.url?.absoluteString, expiresAt: Date().addingTimeInterval(6 * 3600)))
-                }
-                await cloud.fetch(zone: accepted.zone)
-            } else if zoneName == ZoneNames.me {
-                // A friend's history link: accepting is harmless; the handshake does the rest.
-                try await shares.accept(metadata: metadata)
-            } else {
-                throw SocialError.badLink
-            }
-        } catch {
-            self.error("Couldn't open invite", error)
-        }
-    }
-
     // MARK: - Groups
 
     private func offerGroupJoin(_ offer: GroupJoinOffer) {
-        if let mine = store.my.groupLinks.values.first(where: { $0.shareURL != nil && $0.shareURL == offer.url?.absoluteString }) {
-            info("ALREADY IN", "You're already in \(mine.nameCache).")
+        if let mine = store.my.groupLinks.values.first(where: { link in store.cache.zones[link.zone]?.group?.inviteCode == offer.code }) {
+            info(mine.status == .active ? "ALREADY IN" : "ALREADY ASKED", mine.status == .active ? "You're already in \(mine.nameCache)." : "Waiting for the owner of \(mine.nameCache).")
             return
         }
         groupOffers[offer.id] = offer
@@ -266,20 +178,12 @@ extension AppModel {
 
     func createGroup(name: String, object: GroupObject, color: IdentityColor) async -> GroupLink? {
         do {
-            try requireCloud()
+            try requireSignIn()
             guard let link = store.createGroupLocal(name: name, object: object, color: color) else {
                 info("PICK ANOTHER NAME", "Up to 28 characters, nothing offensive.")
                 return nil
             }
-            // The share link is created in the background; the group works locally right away.
-            Task {
-                do {
-                    let url = try await shares.groupShareURL(zone: link.zone, name: link.nameCache)
-                    store.setGroupShareURL(link.id, url)
-                } catch {
-                    self.error("Group link not ready", error)
-                }
-            }
+            sync.sendAll()
             return link
         } catch {
             self.error("Couldn't create group", error)
@@ -288,77 +192,107 @@ extension AppModel {
     }
 
     func groupInviteURL(_ groupID: UUID) async throws -> URL {
-        try requireCloud()
-        guard let link = store.my.groupLinks[groupID] else { throw SocialError.badLink }
-        if let s = link.shareURL, let u = URL(string: s) { return u }
-        guard link.isOwner else { throw SocialError.badLink }
-        let url = try await withBusy("Making invite link…") { try await shares.groupShareURL(zone: link.zone, name: link.nameCache) }
-        store.setGroupShareURL(groupID, url)
-        guard let u = URL(string: url) else { throw SocialError.badLink }
-        return u
+        try requireSignIn()
+        guard let g = store.group(groupID), let info = g.info, !info.inviteCode.isEmpty else { throw SocialActionError.badLink }
+        return DeepLinkCodec.groupURL(GroupInvitePayload(name: info.name, object: info.object, color: info.color, code: info.inviteCode))
     }
 
+    /// "ASK TO JOIN": the owner approves each join.
     func joinGroup(_ offer: GroupJoinOffer) async {
         do {
-            try requireCloud()
-            try await withBusy("Joining \(offer.name)…") {
-                let accepted: ShareService.Accepted
-                if let m = offer.metadata {
-                    accepted = try await shares.accept(metadata: m)
-                } else if let u = offer.url {
-                    accepted = try await shares.accept(url: u)
-                } else {
-                    throw SocialError.badLink
+            try requireSignIn()
+            try await withBusy("Asking to join \(offer.name)…") {
+                let (outcome, preview) = try await social.requestJoin(code: offer.code)
+                switch outcome {
+                case .member:
+                    // Already a member (e.g. reinstalled): the group streams back through sync.
+                    if store.my.groupLinks[preview.gid] == nil {
+                        store.registerGroupRequest(groupID: preview.gid, ownerID: preview.ownerID, name: preview.name, object: preview.object, color: preview.color)
+                        store.groupApproved(preview.gid, joinedAt: Date())
+                    }
+                    tab = .groups
+                    info("YOU'RE IN", "You're already a member of \(preview.name).")
+                case .requested:
+                    store.registerGroupRequest(groupID: preview.gid, ownerID: preview.ownerID, name: preview.name, object: preview.object, color: preview.color)
+                    tab = .groups
+                    show(Toast(style: .social, title: "ASKED TO JOIN \(preview.name.uppercased())", body: "The owner decides. You'll get a nudge when you're in."))
                 }
-                guard let gid = ZoneNames.groupID(fromZoneName: accepted.zone.zoneName) else { throw SocialError.badLink }
-                if accepted.zone.isMine {
-                    info("YOUR GROUP", "You made this one.")
-                    return
-                }
-                await cloud.fetch(zone: accepted.zone)
-                let name = store.cache.zones[accepted.zone]?.group?.name ?? accepted.title ?? offer.name
-                store.registerJoinedGroup(zone: accepted.zone, groupID: gid, name: name, shareURL: offer.url?.absoluteString)
-                tab = .groups
-                show(Toast(style: .social, title: "JOINED \(name.uppercased())", body: "Group activity only. Full history stays between friends."))
             }
         } catch {
-            self.error("Couldn't join", error)
+            self.error("Couldn't ask to join", error)
         }
         groupOffers[offer.id] = nil
     }
 
-    /// Owner only: remove someone from a group (their record, their poop copies, and their access).
+    /// Owner only: approves a join request (the server writes the member row; it streams back).
+    func approveJoin(_ groupID: UUID, request: GroupJoinRequest) async {
+        guard store.settleJoinRequest(groupID, member: request.id) != nil else { return }
+        do {
+            try await social.approveJoin(gid: groupID, uid: request.id)
+            info("APPROVED", "@\(request.person.handle) is in.")
+        } catch {
+            self.error("Couldn't approve", error)
+            await sync.fetchZone(store.my.groupLinks[groupID]?.zone ?? .me)
+        }
+    }
+
+    func declineJoin(_ groupID: UUID, request: GroupJoinRequest) async {
+        guard store.settleJoinRequest(groupID, member: request.id) != nil else { return }
+        do {
+            try await social.declineJoin(gid: groupID, uid: request.id)
+        } catch {
+            self.error("Couldn't decline", error)
+        }
+    }
+
+    /// Owner only: remove someone from a group. They lose access now and can't rejoin with the link.
     func removeMember(_ groupID: UUID, member: GroupMember) async {
         guard let link = store.my.groupLinks[groupID], link.isOwner else { return }
         guard store.removeMember(groupID, member: member.id) else { return }
         do {
-            try await shares.removeFromGroup(zone: link.zone, uid: member.id)
-            info("REMOVED", "@\(member.person.handle) is out of \(link.nameCache).")
+            try await social.kick(gid: groupID, uid: member.id)
+            info("REMOVED", "@\(member.person.handle) is out of \(link.nameCache) and can't rejoin with the link.")
         } catch {
-            self.error("Removed from the list, but iCloud access may remain", error)
+            self.error("Removed from the list, but the server didn't confirm", error)
         }
     }
 
     func leaveGroup(_ groupID: UUID) {
         guard let link = store.my.groupLinks[groupID] else { return }
+        if link.status == .requested {
+            // Withdrawing a join request the owner hasn't answered yet.
+            store.groupRequestEnded(groupID)
+            Task { try? await social.cancelJoinRequest(gid: groupID) }
+            return
+        }
         store.removeGroupLocal(groupID)
-        if link.isOwner { shares.deleteOwned(link.zone) } else { shares.leave(link.zone) }
+        Task {
+            do {
+                if link.isOwner { try await social.deleteGroup(gid: groupID) } else { try await social.leaveGroup(gid: groupID) }
+            } catch {
+                self.error(link.isOwner ? "Couldn't delete on the server" : "Couldn't leave on the server", error)
+            }
+        }
         notifications.rescheduleSummaries(settings: store.settings, groups: store.groupSummaries)
     }
 
     // MARK: - Poop With Me
 
-    /// Starts Poop With Me with friends (ad-hoc private space) — my own poop already counted.
+    /// Starts Poop With Me with friends (ad-hoc space) — my own poop already counted.
     func startPWM(friends: [PersonRef]) async -> UUID? {
         do {
-            try requireCloud()
-            guard store.liveEvent != nil else { throw SocialError.noLiveSession }
+            try requireSignIn()
+            guard store.liveEvent != nil, let me = store.userID else { throw SocialActionError.noLiveSession }
             return try await withBusy("Inviting…") {
-                let zone = ZoneRef(ownerName: ZoneRef.currentUser, zoneName: ZoneNames.session(UUID()))
+                let id = UUID()
+                let zone = ZoneRef.space(id, ownerID: me, me: me)
                 let uids = friends.map(\.id)
-                let url = try await shares.spaceShareURL(zone: zone, title: "Poop With Me", participants: uids)
-                store.registerSpace(SpaceLink(zone: zone, kind: .pwm, isOwner: true, shareURL: url, participantIDs: uids, expiresAt: Date().addingTimeInterval(6 * 3600)))
-                return store.createPWMSession(zone: zone, groupID: nil, invitees: friends)
+                let expires = Date().addingTimeInterval(6 * 3600)
+                try await social.createSpace(id: id, kind: .pwm, title: "Poop With Me", members: uids, expiresAt: expires)
+                store.registerSpace(SpaceLink(zone: zone, kind: .pwm, isOwner: true, title: "Poop With Me", participantIDs: uids, expiresAt: expires))
+                let sid = store.createPWMSession(zone: zone, groupID: nil, invitees: friends)
+                sync.sendAll()
+                return sid
             }
         } catch {
             self.error("Couldn't start Poop With Me", error)
@@ -372,15 +306,18 @@ extension AppModel {
             info("TAP POOP NOW FIRST", "Poop With Me starts from a running timer.")
             return nil
         }
-        return store.createPWMSession(zone: group.link.zone, groupID: group.link.id, invitees: invitees)
+        let sid = store.createPWMSession(zone: group.link.zone, groupID: group.link.id, invitees: invitees)
+        sync.sendAll()
+        return sid
     }
 
     func inviteMore(_ view: LiveSessionView, people: [PersonRef]) async {
         do {
-            if view.zone.isMine, store.my.spaceLinks[view.zone] != nil {
-                _ = try await shares.spaceShareURL(zone: view.zone, title: "Poop With Me", participants: people.map(\.id))
+            if let sid = view.zone.spaceID, store.my.spaceLinks[view.zone]?.isOwner == true {
+                try await social.addSpaceMembers(id: sid, members: people.map(\.id))
             }
             store.inviteMore(zone: view.zone, sessionID: view.session.id, invitees: people)
+            sync.sendAll()
         } catch {
             self.error("Couldn't invite", error)
         }
@@ -393,7 +330,14 @@ extension AppModel {
             info("TOO LATE", "That session already ended.")
             return
         }
+        guard store.canJoinPWM(sessionID) else {
+            // Already pooping in this session: never a second +1, just open it.
+            openPWM = sessionID
+            presentSession(afterDismissal: afterDismissal)
+            return
+        }
         store.joinPWM(zone: view.zone, sessionID: sessionID)
+        sync.sendAll()
         openPWM = sessionID
         presentSession(afterDismissal: afterDismissal)
     }
@@ -402,17 +346,24 @@ extension AppModel {
 
     func createParty(title: String, at date: Date, group: GroupSummary?, friends: [PersonRef]) async -> UUID? {
         do {
-            try requireCloud()
+            try requireSignIn()
             if let group {
                 let invitees = group.members.map(\.person).filter { $0.id != store.userID }
-                return store.createParty(zone: group.link.zone, groupID: group.link.id, title: title, at: date, invitees: invitees)
+                let pid = store.createParty(zone: group.link.zone, groupID: group.link.id, title: title, at: date, invitees: invitees)
+                sync.sendAll()
+                return pid
             }
+            guard let me = store.userID else { throw SocialActionError.needsSignIn }
             return try await withBusy("Scheduling…") {
-                let zone = ZoneRef(ownerName: ZoneRef.currentUser, zoneName: ZoneNames.session(UUID()))
+                let id = UUID()
+                let zone = ZoneRef.space(id, ownerID: me, me: me)
                 let uids = friends.map(\.id)
-                let url = try await shares.spaceShareURL(zone: zone, title: title, participants: uids)
-                store.registerSpace(SpaceLink(zone: zone, kind: .party, isOwner: true, shareURL: url, participantIDs: uids, expiresAt: date.addingTimeInterval(24 * 3600)))
-                return store.createParty(zone: zone, groupID: nil, title: title, at: date, invitees: friends)
+                let expires = date.addingTimeInterval(24 * 3600)
+                try await social.createSpace(id: id, kind: .party, title: title, members: uids, expiresAt: expires)
+                store.registerSpace(SpaceLink(zone: zone, kind: .party, isOwner: true, title: title, participantIDs: uids, expiresAt: expires))
+                let pid = store.createParty(zone: zone, groupID: nil, title: title, at: date, invitees: friends)
+                sync.sendAll()
+                return pid
             }
         } catch {
             self.error("Couldn't schedule", error)
@@ -421,11 +372,50 @@ extension AppModel {
     }
 
     func joinParty(_ view: PartyView, afterDismissal: Bool = false) {
+        guard store.canJoinParty(view.party.id) else {
+            partyNotJoinable(view)
+            return
+        }
         store.joinParty(zone: view.zone, partyID: view.party.id)
+        sync.sendAll()
         presentSession(afterDismissal: afterDismissal)
     }
 
+    private func partyNotJoinable(_ view: PartyView) {
+        if store.myRSVP(view)?.joinedAt != nil {
+            info("YOU'RE ALREADY IN", "Your poop for \(view.party.title) already counted.")
+            if store.liveEvent != nil { presentSession() }
+        } else if view.party.status == .cancelled {
+            info("PARTY CANCELLED", "\(view.party.title) isn't happening.")
+        } else if view.party.isOver(now: Date()) {
+            info("PARTY'S OVER", "\(view.party.title) ended. POOP NOW still counts for you.")
+        } else {
+            info("NOT YET", "\(view.party.title) opens 10 minutes before it starts.")
+            sheet = .party(view.party.id)
+        }
+    }
+
+    /// Deletes (owner) session spaces that are past their expiry; guests just forget them.
+    func cleanupSpaces() {
+        for space in store.expiredSpaces() {
+            if space.isOwner { sync.deleteZone(space.zone) }
+            store.removeSpace(space.zone)
+        }
+    }
+
     // MARK: - Notification taps
+
+    /// Makes sure the zone a push named is known and freshly read (ad-hoc spaces may not be linked yet).
+    private func zoneFromPush(_ userInfo: [AnyHashable: Any]) async -> ZoneRef? {
+        let groupID = userInfo[PushField.groupID] as? String
+        let spaceID = userInfo[PushField.space] as? String
+        if let s = spaceID, let sid = UUID(uuidString: s), store.my.spaceLinks.values.first(where: { $0.zone.spaceID == sid }) == nil {
+            return await sync.fetchSpace(sid)
+        }
+        guard let zone = sync.zone(groupID: groupID, spaceID: spaceID) else { return nil }
+        await sync.fetchZone(zone)
+        return zone
+    }
 
     func handleNotification(userInfo: [AnyHashable: Any], action: String) {
         let kind = userInfo[NotificationManager.Key.kind] as? String
@@ -436,40 +426,57 @@ extension AppModel {
         if let s = userInfo[NotificationManager.Key.party] as? String, let pid = UUID(uuidString: s) {
             if action == NotificationCategory.actionJoin {
                 // JOIN = "I'm pooping now": +1 and the timer start immediately, before any network.
+                // The party itself is checked first (stale alert, cancelled, already joined); an
+                // unknown party gets the poop now and is attached only if it turns out to be live.
                 if let p = store.party(pid) {
                     joinParty(p)
                 } else {
                     let event = store.startTimed(partyID: pid)
                     presentSession()
                     Task {
-                        await refresh()
-                        if let p = store.party(pid) { store.attachToParty(zone: p.zone, partyID: pid, eventID: event.id) }
+                        _ = await zoneFromPush(userInfo)
+                        if let p = store.party(pid) {
+                            if store.canJoinParty(pid) {
+                                store.attachToParty(zone: p.zone, partyID: pid, eventID: event.id)
+                                sync.sendAll()
+                            } else {
+                                store.detachFromParty(eventID: event.id)
+                                info("PARTY'S OVER", "\(p.party.title) had ended. Your poop still counts.")
+                            }
+                        } else {
+                            store.detachFromParty(eventID: event.id)
+                            info("PARTY NOT FOUND", "It was cancelled or never synced. Your poop still counts.")
+                        }
                     }
                 }
                 return
             }
             Task {
-                await refresh()
+                _ = await zoneFromPush(userInfo)
                 sheet = .party(pid)
             }
             return
         }
         if let s = userInfo[NotificationManager.Key.session] as? String, let sid = UUID(uuidString: s) {
-            let share = userInfo[NotificationManager.Key.share] as? String
             if action == NotificationCategory.actionJoin {
                 if store.liveSession(sid) != nil {
                     joinPWM(sid)
+                } else if store.liveEvent?.pwmSessionID == sid {
+                    // Already in it (a second JOIN on a stacked alert): just open the session.
+                    openPWM = sid
+                    presentSession()
                 } else {
                     // Count it and start the timer now; attach to the session once it has synced.
                     let event = store.startTimed(pwmSessionID: sid)
                     openPWM = sid
                     presentSession()
                     Task {
-                        if let share { try? await joinSpace(url: share, kind: .pwm, expires: Date().addingTimeInterval(6 * 3600)) }
-                        await refresh()
+                        _ = await zoneFromPush(userInfo)
                         if let view = store.liveSession(sid) {
                             store.attachToPWM(zone: view.zone, sessionID: sid, eventID: event.id)
+                            sync.sendAll()
                         } else {
+                            store.detachFromPWM(eventID: event.id)
                             info("SESSION ENDED", "Everyone else finished. Your poop still counts.")
                         }
                     }
@@ -477,8 +484,7 @@ extension AppModel {
                 return
             }
             Task {
-                if let share { try? await joinSpace(url: share, kind: .pwm, expires: Date().addingTimeInterval(6 * 3600)) }
-                await refresh()
+                _ = await zoneFromPush(userInfo)
                 sheet = .pwmInvite(sid)
             }
             return
@@ -487,7 +493,8 @@ extension AppModel {
         case "highlights-day": sheet = .highlights(.day, Date())
         case "highlights-week": sheet = .highlights(.week, Date().addingTimeInterval(-7 * 24 * 3600))
         case "highlights-month": sheet = .highlights(.month, Date().addingTimeInterval(-15 * 24 * 3600))
-        case PingKind.friendRequest.rawValue: tab = .you
+        case PingKind.friendRequest.rawValue, PingKind.friendComplete.rawValue: tab = .you
+        case PingKind.groupJoinRequest.rawValue, PingKind.groupJoined.rawValue: tab = .groups
         case "highlights-group":
             if let raw = userInfo[NotificationManager.Key.group] as? String, let gid = UUID(uuidString: raw), let g = store.group(gid) {
                 sheet = .groupHighlights(g.link.zone)

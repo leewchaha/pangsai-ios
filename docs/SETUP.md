@@ -1,8 +1,8 @@
-# ShittyFriends — Setup (Apple Developer, CloudKit, Codemagic)
+# ShittyFriends — Setup (Apple Developer, Firebase, Codemagic)
 
-Do these once, in order. Nothing here involves a server you run: all user data lives on-device and in
-each user's own iCloud. The only developer-side pieces are the iCloud container's **schema** and the
-**public-database "Ping" channel** (anonymous, sealed, self-expiring notification records).
+Do these once, in order. The backend is one Firebase project you own: Authentication, Cloud Firestore,
+Cloud Functions and Cloud Messaging. Users' data lives on their device first and in their account on
+that project, visible only to the friends and groups they chose (`firebase/firestore.rules`).
 
 Identifiers used everywhere (must match exactly):
 
@@ -10,217 +10,162 @@ Identifiers used everywhere (must match exactly):
 |---|---|
 | App bundle ID | `com.sakara.shittyfriends` |
 | Notification extension bundle ID | `com.sakara.shittyfriends.NotificationService` |
-| iCloud container | `iCloud.com.sakara.shittyfriends` |
+| Live Activity extension bundle ID | `com.sakara.shittyfriends.PoopingLiveActivity` |
 | App Group | `group.com.sakara.shittyfriends` |
 | App Store Connect Apple ID | `6819505355` |
+| Cloud Functions region | `asia-northeast1` (change in `firebase/functions/src/index.ts` **and** `FirebaseConfig.functionsRegion`) |
 
-An **individual** Apple Developer account supports everything here (iCloud/CloudKit, Push, App Groups,
-TestFlight).
+An **individual** Apple Developer account supports everything here. Firebase's free (Spark) plan
+does not run Cloud Functions; the **Blaze** (pay as you go) plan is required. At the sizes this app
+targets (close friends, no feed) usage stays inside the free quotas.
 
 ---
 
 ## 1. Apple Developer portal (developer.apple.com → Certificates, Identifiers & Profiles)
 
-> ⚠️ Do steps 1.1–1.4 **before** the first signed Codemagic build. The `ios-testflight`
-> workflow **uses existing signing identities in Codemagic**; it does not automatically
-> register App IDs, enable capabilities, or regenerate out-of-date profiles.
+> ⚠️ Do steps 1.1–1.5 **before** the first signed Codemagic build. The `ios-testflight` workflow
+> uses existing signing identities in Codemagic; it does not register App IDs or capabilities.
 
-1. **Identifiers → `+` → iCloud Containers**: create `iCloud.com.sakara.shittyfriends`.
-2. **Identifiers → `+` → App Groups**: create `group.com.sakara.shittyfriends`.
-3. **Identifiers → App IDs → `com.sakara.shittyfriends`** (it already exists from App Store Connect).
-   Enable and configure:
-   - **iCloud** → check *CloudKit* → *Configure* → select `iCloud.com.sakara.shittyfriends`.
-   - **Push Notifications** (no certificate needed; CloudKit uses token auth).
-   - **App Groups** → *Configure* → select `group.com.sakara.shittyfriends`.
+1. **Identifiers → `+` → App Groups**: create `group.com.sakara.shittyfriends` (if not done before).
+2. **Identifiers → App IDs → `com.sakara.shittyfriends`**. Enable and configure:
+   - **Sign in with Apple** (enable; "Enable as a primary App ID").
+   - **Push Notifications** (no certificate needed; Firebase uses an APNs **key**, step 2.4).
+   - **App Groups** → select `group.com.sakara.shittyfriends`.
+   - iCloud is **no longer needed**; leave it off (or remove it).
    - Save.
-4. **Identifiers → `+` → App IDs → App** with bundle ID `com.sakara.shittyfriends.NotificationService`
-   (description e.g. "ShittyFriends Notifications"). Enable **App Groups** → select the same group. Save.
-5. **Profiles**: after the capabilities are enabled, **create/regenerate two separate App Store
-   distribution provisioning profiles**, one for each bundle ID. Earlier profiles do not
-   gain newly enabled App Groups/CloudKit/Push entitlements. Fetch/upload the new profiles
-   into Codemagic's **Code signing identities**, and retire stale ones there to avoid
-   accidentally selecting them. Codemagic's current YAML workflow does **not** generate
-   these missing profiles. See `docs/APP_GROUPS_SIGNING_FIX.md`.
+3. App IDs for `com.sakara.shittyfriends.NotificationService` and `com.sakara.shittyfriends.PoopingLiveActivity`
+   with **App Groups** → the same group (both exist from earlier builds; check the group is ticked).
+4. **Keys → `+`**: create an **APNs key** (Apple Push Notifications service). Download the `.p8` once,
+   note the **Key ID** and your **Team ID**. This goes into Firebase (2.4), never into the repo.
+5. **Profiles**: regenerate the **App Store** distribution profiles for all three bundle IDs after
+   changing capabilities (the app profile now carries Sign in with Apple instead of iCloud). Fetch/upload
+   them into Codemagic's **Code signing identities** and retire stale ones. `scripts/verify_signing_profiles.py`
+   checks App Groups, Sign in with Apple and production push on the installed profiles.
 
-⚠️ Safety: never commit the `.p8` API key, certificates or profiles. `.gitignore` already blocks them.
+⚠️ Never commit `.p8` keys, certificates, profiles, `GoogleService-Info.plist` or service-account JSON.
+`.gitignore` blocks them.
 
 ---
 
-## 2. App Store Connect API key (for Codemagic)
+## 2. Firebase project (console.firebase.google.com)
 
-Users and Access → **Integrations** → App Store Connect API → *Team Keys* → `+`
-(role **App Manager** is enough). Download the `.p8` **once** (Apple won't show it again) and note:
+### 2.1 Create the project and the iOS app
+1. **Add project** (any name; note the **project ID**). Analytics can stay off.
+2. Upgrade to the **Blaze** plan (Cloud Functions need it).
+3. **Add app → iOS**: bundle ID `com.sakara.shittyfriends`, App Store ID `6819505355`.
+   Download **`GoogleService-Info.plist`**. Keep it outside the repo; it is injected at build time (3.2).
 
-- **Issuer ID** (top of the page)
-- **Key ID** (in the key's row). The handoff lists `HLBSVSN338` as the API identifier; if that is the
-  Key ID shown next to your key, use it.
+### 2.2 Authentication
+**Build → Authentication → Sign-in method**:
+- Enable **Apple**. Nothing else to fill in for the native iOS flow.
+- Optional: enable **Google**. Then re-download `GoogleService-Info.plist` (it now contains
+  `CLIENT_ID` / `REVERSED_CLIENT_ID`). The app shows the Google button only when that CLIENT_ID is
+  present; Codemagic inserts the reversed client id into `Info.plist` automatically (3.2). For a local
+  Xcode build, replace `REVERSED_CLIENT_ID_PLACEHOLDER` in `ShittyFriends/Info.plist` by hand.
+
+### 2.3 Firestore
+**Build → Firestore Database → Create database** → production mode, pick a region close to your users
+(e.g. `asia-northeast1`). Rules and indexes are deployed from the repo (2.5), not typed in the console.
+
+### 2.4 Cloud Messaging (APNs)
+**Project settings → Cloud Messaging → Apple app configuration → APNs Authentication Key**: upload the
+`.p8` from 1.4 with its Key ID and your Team ID. Without this, no alerts arrive.
+
+### 2.5 Deploy rules + functions
+Either run the Codemagic workflow **firebase-deploy** (3.3) or, on any machine with Node 20:
+
+```bash
+npm install -g firebase-tools
+firebase login
+cd firebase
+firebase use <project-id>              # also fix firebase/.firebaserc
+cd functions && npm ci && npm run build && cd ..
+firebase deploy --only firestore:rules,firestore:indexes,functions
+```
+
+Re-deploy whenever `firestore.rules`, `firestore.indexes.json` or `functions/src` change.
+
+### 2.6 Service account (for Codemagic deploys only)
+**Project settings → Service accounts → Generate new private key** (JSON). Store it only as the
+Codemagic secret `FIREBASE_SERVICE_ACCOUNT` (3.1).
 
 ---
 
 ## 3. Codemagic
 
-### 3.1 Repository
-Codemagic builds from a Git repository. This package **includes its `.git` history**, so:
+### 3.1 Environment group `firebase`
+**Codemagic → application → Environment variables**, group named exactly **`firebase`**:
 
-```bash
-cd ShittyFriends
-git remote add origin git@github.com:<you>/shittyfriends-ios.git   # create a PRIVATE repo first
-git push -u origin main
-```
+| Variable | Value | Secret |
+|---|---|---|
+| `GOOGLE_SERVICE_INFO_PLIST` | `base64 -i GoogleService-Info.plist \| pbcopy` (one line) | yes |
+| `FIREBASE_PROJECT_ID` | the project id | no |
+| `FIREBASE_SERVICE_ACCOUNT` | the service-account JSON (2.6), pasted as is | yes |
 
-Then in Codemagic: **Add application → connect the repo → "codemagic.yaml" workflow**.
+`ios-check` works without any of them (the app then runs local-only in tests). `ios-testflight`
+refuses to build without `GOOGLE_SERVICE_INFO_PLIST`. `firebase-deploy` needs the other two.
 
 ### 3.2 App Store Connect integration and code signing identities
+Unchanged from before: the **Apple Developer Portal integration** named in `codemagic.yaml`
+(`integrations: app_store_connect`), one **Apple Distribution** certificate, and **App Store** profiles
+for all three bundle IDs (1.5). The `Preflight App Store provisioning profiles` step stops early with
+exact instructions when a profile is missing or lacks App Groups / Sign in with Apple / push.
 
-The **v0.1.2 Launch Fix** already uses Codemagic's built-in Apple Developer Portal
-integration named `shittyfriends`. This v1.0.0 workflow now uses the **same integration
-method**, instead of manually invoking `app-store-connect fetch-signing-files` with
-four environment variables. The latter caused the reported error:
-`argument --issuer-id: Missing value ISSUER_ID`.
-
-In **Codemagic → Team settings → Integrations → Developer Portal**, configure the
-App Store Connect API key and name it **`shittyfriends`**, exactly matching:
-
-```yaml
-integrations:
-  app_store_connect: shittyfriends
-```
-
-Supply the Apple **Issuer ID**, **Key ID**, and the `.p8` private key securely in
-Codemagic. The key needs adequate permissions (App Manager is recommended for
-TestFlight publishing). The integration name is **not** the Key ID.
-
-In **Codemagic → Team settings → Code signing identities**, add/fetch:
-
-1. One valid **Apple Distribution** certificate (including its private key).
-2. An **App Store** provisioning profile for `com.sakara.shittyfriends` with
-   iCloud/CloudKit, Push Notifications and App Groups enabled.
-3. A separate **App Store** provisioning profile for
-   `com.sakara.shittyfriends.NotificationService` with App Groups enabled.
-
-Both profiles must be on the same Apple Developer team as the certificate.
-The `ios_signing` configuration loads profiles matching the app bundle identifier
-**and embedded extensions**, provided they were already uploaded/fetched into
-Codemagic; `xcode-project use-profiles --archive-method app-store` applies them.
-The TestFlight workflow now checks both targets' installed profiles and Release
-signing assignments and stops early with actionable instructions if the
-App Groups entitlement is missing. See `docs/APP_GROUPS_SIGNING_FIX.md`.
-**This approach selects existing Codemagic signing identities; it does not create
-missing portal identifiers, capabilities, certificates, or profiles.**
-
-You **do not** need an `appstore_credentials` environment variable group for this
-workflow. Do not add Apple API secrets to the repository.
-
-#### Optional CloudKit import workflow
-
-The standalone `cloudkit-schema` workflow still uses the `cloudkit` environment
-group, separate from TestFlight:
-
-| Variable | Value |
-|---|---|
-| `CLOUDKIT_MANAGEMENT_TOKEN` | **CloudKit Console → account Settings → generate a management token** (copy it when created) |
-| `TEAM_ID` | Your 10-character Apple Developer Team ID (not the App Store Connect Issuer ID or API Key ID) |
-
-To make the `cloudkit-schema` workflow work in Codemagic:
-
-1. Open **CloudKit Console** (`icloud.developer.apple.com`), sign in with the Apple Developer account that owns `iCloud.com.sakara.shittyfriends`, and open your **account Settings**. Generate a **Management Token** and copy it immediately; it is not shown again.
-2. Open **Codemagic → ShittyFriends application → Environment variables** (or team-level Global variables and secrets if you deliberately want to reuse it). Create/use the variable group named exactly **`cloudkit`**.
-3. Add variable **`CLOUDKIT_MANAGEMENT_TOKEN`**, paste the token, and mark it **Secret**. Add **`TEAM_ID`** in the **same** `cloudkit` group using your Apple Developer Team ID.
-4. Commit/push `codemagic.yaml` to the branch being built; run **`cloudkit-schema`** separately. It checks credentials before contacting Apple, validates the schema, and only then imports into **Development**.
-5. If this is your first CloudKit deployment, use CloudKit Console to **review and deploy changes to Production** after a successful import. The workflow deliberately does not deploy to Production.
-
-The **CloudKit Management Token is not** the App Store Connect API `.p8` key, Issuer ID, API Key ID, or the `shittyfriends` Codemagic Developer Portal integration. CloudKit management tokens generally expire (Apple documents a default one-year lifetime); replace the Secret if it expires. Never paste the token in logs, project files, screenshots, or chat.
-
-`ios-testflight` and `ios-check` do **not** call `cktool`. If you only want to compile/upload a build, select **`ios-testflight`**; it will not perform the schema import. However, CloudKit functionality in TestFlight still requires the schema to be present in **Production**.
+The `Install Firebase config` step writes `GoogleService-Info.plist` into `ShittyFriends/Resources/`
+and, when the plist carries `REVERSED_CLIENT_ID`, patches the Google sign-in URL scheme into `Info.plist`.
 
 ### 3.3 Workflows (in `codemagic.yaml`)
 
 | Workflow | What it does | Needs |
 |---|---|---|
-| `ios-check` | Generates XcodeGen project and runs unsigned simulator tests | No Apple credentials |
-| `ios-testflight` | Uses stored signing identities, applies profiles for app and extension, builds IPA, uploads to TestFlight | Codemagic Developer Portal integration `shittyfriends`; App Store profiles for both bundle IDs; distribution certificate |
-| `cloudkit-schema` | Imports the CloudKit schema into the Development environment | Optional `cloudkit` group |
+| `ios-check` | Generates the XcodeGen project and runs unsigned simulator tests | nothing (Firebase config optional) |
+| `ios-testflight` | Signed build, uploads to TestFlight | integration, three App Store profiles, `GOOGLE_SERVICE_INFO_PLIST` |
+| `firebase-deploy` | Deploys Firestore rules/indexes and Cloud Functions | `FIREBASE_PROJECT_ID`, `FIREBASE_SERVICE_ACCOUNT` |
 
-**Run `ios-check` first.** If it fails, the log ends with a block titled
-`ERRORS (paste these to Claude)`; examine the attached log.
-
-If `ios-testflight` fails, distinguish the causes:
-
-- **Integration not found / cannot authenticate**: connect the Developer Portal integration
-  named `shittyfriends` and verify the Apple API credentials. The missing issuer-ID
-  message should not occur on the old `fetch-signing-files` step because that step is removed.
-- **No matching signing files / App Groups mismatch**: enable the SAME App Group
-  on the parent and extension App IDs in Apple's portal; regenerate **both**
-  App Store profiles after updating capabilities, then fetch/upload them into Codemagic.
-  The new `Preflight App Store provisioning profiles` step diagnoses missing and stale profiles,
-  and `Verify Release signing assignments` catches an old profile selected for the extension.
-  See `docs/APP_GROUPS_SIGNING_FIX.md`.
-- **CLI build-number lookup fails**: this workflow now fails explicitly; it no longer
-  silently substitutes build number 1 on an authentication or network error.
+**Run `ios-check` first.** If it fails, the log ends with a block titled `ERRORS (paste these to Claude)`.
+Then `firebase-deploy`, then `ios-testflight`.
 
 ---
 
-## 4. CloudKit schema (must be in **Production** before TestFlight works)
+## 4. App Store Connect app record
 
-TestFlight and App Store builds talk to the **Production** CloudKit environment, which can't
-auto-create record types. The custom schema has to be imported into Development, then deployed.
-
-**CKShare has one extra one-time step.** Apple's system `cloudkit.share` type is not defined by
-`CloudKit/schema.ckdb`. Run a development-signed Debug build on an iCloud device once; the app's
-DEBUG bootstrap originates a real history share in Development. Then deploy the resulting sharing
-schema to Production. See `docs/CLOUDKIT_SHARING_PRODUCTION_FIX.md`. Importing `schema.ckdb` alone
-does not fix `Cannot create new type cloudkit.share in production schema`.
-
-### 4.1 Import into Development (pick one)
-- **Codemagic:** run the `cloudkit-schema` workflow (requires `CLOUDKIT_MANAGEMENT_TOKEN` and `TEAM_ID` in the `cloudkit` group; setup in §3.2).
-- **Any Mac:** `xcrun cktool import-schema --team-id <TEAM_ID> --container-id iCloud.com.sakara.shittyfriends --environment development --file CloudKit/schema.ckdb`
-  (after `xcrun cktool save-token --type management`).
-- **By hand:** CloudKit Console → container → Schema → create the record types/fields/indexes exactly as
-  in `CloudKit/schema.ckdb`.
-
-### 4.2 Deploy to Production
-CloudKit Console (icloud.developer.apple.com) → `iCloud.com.sakara.shittyfriends` →
-**Deploy Schema Changes…** → confirm. Re-deploy whenever `schema.ckdb` changes.
-
-Check after deploying, in Production → Schema → Indexes, that **Ping** has `to` and `kind` **QUERYABLE**
-and `exp` **QUERYABLE + SORTABLE**. Without them, friend/group notifications silently don't arrive.
+- Name: **ShittyFriends** (keep a different fallback name ready in case review rejects it, handoff §40).
+- Age rating: mild crude humor, no user-generated photos, no public chat. The app blocks under-13
+  sign-up with a neutral date-of-birth check that isn't stored.
+- **Sign in with Apple**: offered (required by Apple whenever Google sign-in is offered too).
+- **Export compliance**: `ITSAppUsesNonExemptEncryption = NO` stays correct (HTTPS/TLS only).
+- **Privacy "nutrition label"**: data is stored in the user's account on your Firebase project and
+  shared only with the friends/groups they chose. Declare at least: *Identifiers (User ID) — app
+  functionality*, *Location (coarse/precise, per poop) — app functionality*, *User content (handle,
+  avatar, poop history) — app functionality*, *Contacts: none*. Linked to the user, not used for
+  tracking. Add **Account deletion**: the app offers it (YOU → Settings → Delete my account), done
+  server-side by the `deleteAccount` function.
+- Privacy policy must mention Firebase (Google) as the hosting provider.
 
 ---
 
-## 5. App Store Connect app record
+## 5. First device test (two iPhones, two different Apple IDs)
 
-- Name: **ShittyFriends** (keep a different fallback name ready in case review rejects it, per handoff §40).
-- Age rating: answer the questionnaire honestly. Mild crude humor, no user-generated photos, no public
-  chat. The app itself blocks under-13 sign-up with a neutral date-of-birth check that isn't stored.
-- **Export compliance**: `ITSAppUsesNonExemptEncryption = NO` is set in Info.plist. The only encryption
-  is Apple's own CryptoKit (AES-GCM sealing of ping payloads) plus HTTPS, i.e. encryption provided by
-  the OS. If App Store Connect asks, answer accordingly. ⚠️ You're responsible for this declaration; if
-  unsure, check Apple's export-compliance guidance.
-- **Privacy "nutrition label"**: data is stored in the user's own iCloud and is not collected by you.
-  Location is optional, per-poop, and shared only with the user's friends/groups through their iCloud.
-  Fill in "Data Not Collected", or "Location → App Functionality, not linked to tracking" if you prefer
-  to be conservative.
+TestFlight build on both phones. Then:
 
----
-
-## 6. First device test (two iPhones, two different Apple IDs)
-
-TestFlight build → install on both phones (each signed in to its **own** iCloud account, iCloud Drive
-on). Then go through:
-
-1. Onboard both. Log a double-tap poop offline (airplane mode), relaunch, go online → it syncs.
-2. Phone A: Home → 👥 → share invite → Phone B opens the link → request → Phone A accepts → both see
-   each other's full calendar (including old entries) and "currently pooping" bubbles.
-3. Phone A single-taps POOPING → Phone B gets "💩 @a is pooping" (also with B's app killed).
+1. Onboard both (age → **sign in with Apple** → handle/avatar). Log a double-tap poop in airplane mode,
+   relaunch, go online → it syncs (Firebase console → Firestore → `users/{uid}/events`).
+2. Phone A: Home → 👥 → share invite → Phone B opens the link → **SEND REQUEST** → A gets the alert,
+   accepts → both see each other's full calendar (including old entries) and "currently pooping".
+3. Phone A single-taps POOP NOW → after ~6 s B gets "💩 @a is pooping" (also with B's app killed).
 4. Poop With Me: A invites B → B taps **JOIN** on the notification → B's +1 and timer start
    immediately → reactions fly both ways → A taps DONE → A sees "STILL GOING" and can keep watching.
-5. Groups: create on A, join on B via the link → B can see the group leaderboard but **not** A's full
-   history unless they're also friends. Owner can remove a member from the member list (⋯).
-6. Poop Party scheduled 6 minutes ahead → 5-minute reminder → start alert with JOIN.
+5. Groups: create on A, B opens the link → **ASK TO JOIN** → A gets "@b wants to join" → **LET IN** →
+   B sees the leaderboard but **not** A's full history. A removes B (⋯) → B is out and the link no
+   longer lets B back in ("The owner removed you").
+6. Poop Party scheduled 6 minutes ahead → 5-minute reminder → start alert with JOIN. A party only
+   counts for achievements when somebody else joins too.
 7. YOU → Settings → **Private lock screen** on → alerts read "ShittyFriends / @a checked in".
-8. Unfriend on A → B loses A's calendar.
-9. YOU → Settings → **Export my data** → zip opens with all files listed in handoff §2.3.
-10. "Delete all my data" on A → A is back at onboarding, and A's other devices wipe too.
+8. Unfriend on A → B loses A's calendar at once. Block on A → B can't request again.
+9. YOU → Settings → **Export my data** → zip with all files listed in handoff §2.3. Import it on a fresh
+   install: poops come back as "imported" (history only, no points, no leaderboards).
+10. Sign out on A, sign in again → everything is back. **Delete my account** on A → A is back at
+    onboarding; B sees the friendship gone; the Firebase console shows no `users/{a}` document.
 
-Things that can only be verified on devices: push delivery timing, background session timers, and
-CloudKit share acceptance flows.
+Things that can only be verified on devices: push delivery timing, background session timers, Live
+Activity, Sign in with Apple's real flow.

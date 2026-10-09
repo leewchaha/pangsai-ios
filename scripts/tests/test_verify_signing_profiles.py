@@ -14,15 +14,14 @@ preflight = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(preflight)
 
 
-def profile(bundle, *, group=True, team='56T7HW68RT', app_store=True, cloudkit=True, apns=True, name=None):
+def profile(bundle, *, group=True, team='56T7HW68RT', app_store=True, apple_sign_in=True, apns=True, name=None):
     ent = {
         'application-identifier': team + '.' + bundle,
         'com.apple.security.application-groups': [preflight.APP_GROUP] if group else [],
         'get-task-allow': not app_store,
     }
     if bundle == preflight.APP_ID:
-        ent['com.apple.developer.icloud-container-identifiers'] = ([preflight.ICLOUD_CONTAINER] if cloudkit else [])
-        ent['com.apple.developer.icloud-services'] = ['CloudKit'] if cloudkit else []
+        ent[preflight.APPLE_SIGN_IN_ENTITLEMENT] = ['Default'] if apple_sign_in else []
         ent['aps-environment'] = 'production' if apns else 'development'
     return {
         'Name': name or bundle + ' AppStore', 'UUID': 'uuid-' + bundle,
@@ -85,24 +84,24 @@ class SigningProfileTests(unittest.TestCase):
         invalid = [self.good[0], self.good[1], profile(preflight.LIVE_ACTIVITY_ID, group=False)]
         self.assertIn('App Groups entitlement missing', '\n'.join(self.errors(invalid)))
 
-    def test_cloudkit_wildcard_profile_is_valid(self):
+    def test_apple_sign_in_wildcard_profile_is_valid(self):
         app = profile(preflight.APP_ID)
         # Apple may encode the provisioning-profile allowlist as the wildcard
-        # string "*" even though the app entitlement itself requests CloudKit.
-        app['Entitlements']['com.apple.developer.icloud-services'] = '*'
+        # string "*" even though the app entitlement itself requests "Default".
+        app['Entitlements'][preflight.APPLE_SIGN_IN_ENTITLEMENT] = '*'
         profiles = [app, self.good[1], self.good[2]]
         self.assertEqual(self.errors(profiles), [])
 
-    def test_cloudkit_wildcard_array_profile_is_valid(self):
+    def test_apple_sign_in_wildcard_array_profile_is_valid(self):
         app = profile(preflight.APP_ID)
-        app['Entitlements']['com.apple.developer.icloud-services'] = ['*']
+        app['Entitlements'][preflight.APPLE_SIGN_IN_ENTITLEMENT] = ['*']
         profiles = [app, self.good[1], self.good[2]]
         self.assertEqual(self.errors(profiles), [])
 
-    def test_main_missing_cloudkit_and_push(self):
-        profiles = [profile(preflight.APP_ID, cloudkit=False, apns=False), self.good[1], self.good[2]]
+    def test_main_missing_apple_sign_in_and_push(self):
+        profiles = [profile(preflight.APP_ID, apple_sign_in=False, apns=False), self.good[1], self.good[2]]
         err = '\n'.join(self.errors(profiles))
-        self.assertIn('CloudKit', err)
+        self.assertIn('Sign in with Apple', err)
         self.assertIn('Push Notifications', err)
 
     def test_wrong_distribution_type(self):

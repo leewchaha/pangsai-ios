@@ -51,7 +51,8 @@ struct PoopStageView: UIViewRepresentable {
         let holder = scene.rootNode.childNode(withName: "holder", recursively: false)
         context.coordinator.holder = holder
         context.coordinator.cosmetic = id
-        if idleSpin {
+        // The idle sway/bob is decoration; Reduce Motion gets a still model (taps still animate).
+        if idleSpin && !UIAccessibility.isReduceMotionEnabled {
             let sway = SCNAction.sequence([
                 .rotateBy(x: 0, y: 0.5, z: 0, duration: 2.2),
                 .rotateBy(x: 0, y: -1.0, z: 0, duration: 4.4),

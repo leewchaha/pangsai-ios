@@ -80,7 +80,7 @@ public struct UserProfile: Codable, Hashable, Sendable {
         case handle, avatar, color, equippedCosmetic, equippedPinShine, pinShines, bankedHalfPoints, createdAt, updatedAt
     }
 
-    /// Older local backups and CloudKit profiles have no shine or banked-points fields.
+    /// Older local backups and synced profiles have no shine or banked-points fields.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         handle = try c.decode(String.self, forKey: .handle)

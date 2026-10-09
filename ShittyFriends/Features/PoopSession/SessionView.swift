@@ -287,7 +287,7 @@ struct SessionView: View {
                     .font(.heading(10))
                     .foregroundStyle(Palette.inkFixed.opacity(0.6))
                 Spacer()
-                Text("BALANCE \(store.pointsBalance)")
+                Text("BALANCE \(formatPoints(store.pointsBalance))")
                     .font(.heading(10))
                     .foregroundStyle(Palette.inkFixed.opacity(0.65))
                     .contentTransition(.numericText(value: Double(store.pointsBalance)))
@@ -354,6 +354,7 @@ struct TapPopView: View {
 /// Emoji confetti for criticals, milestones and DONE.
 struct ConfettiBurst: View {
     var trigger: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pieces: [Piece] = []
 
     struct Piece: Identifiable {
@@ -378,6 +379,7 @@ struct ConfettiBurst: View {
             }
         }
         .onChange(of: trigger) { _, _ in
+            guard !reduceMotion else { return }
             let emojis = ["💩", "✨", "🧻", "⭐️", "💥", "👑"]
             let new = (0..<16).map { _ in Piece(emoji: emojis.randomElement()!, dx: .random(in: -220...220), dy: .random(in: -420...160), spin: .random(in: -540...540)) }
             pieces.append(contentsOf: new)
@@ -431,7 +433,7 @@ struct DoneCard: View {
             HStack(spacing: 12) {
                 stat("\(model.store.todayCount())", "TODAY")
                 stat("+" + formatHalfPoints(event.halfPoints), "POINTS")
-                stat("\(model.store.pointsBalance)", "BALANCE")
+                stat(formatPoints(model.store.pointsBalance), "BALANCE")
             }
             .padding(.top, 8)
             if let sid = event.pwmSessionID, let v = model.store.liveSession(sid) {
@@ -466,6 +468,7 @@ struct DoneCard: View {
         }
         .frame(width: 96, height: 72)
         .sticker(.white, radius: 16, shadow: 3)
+        .accessibilityElement(children: .combine)
     }
 }
 

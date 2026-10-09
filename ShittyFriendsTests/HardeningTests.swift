@@ -73,8 +73,12 @@ final class HardeningTests: XCTestCase {
     private func joinedGroup(_ store: Store) -> (ZoneRef, UUID) {
         let zone = ZoneRef(ownerName: "_josh", zoneName: ZoneNames.group(UUID()))
         let gid = ZoneNames.groupID(fromZoneName: zone.zoneName)!
-        store.registerJoinedGroup(zone: zone, groupID: gid, name: "Class", shareURL: nil)
-        store.apply([.upsertFrom(.groupInfo(GroupInfo(id: gid, name: "Class", object: .toilet, color: .violet, createdBy: "_josh")), zone: zone, writer: "_josh")])
+        store.registerGroupRequest(groupID: gid, ownerID: "_josh", name: "Class", object: .toilet, color: .violet)
+        store.apply([
+            .upsertFrom(.groupInfo(GroupInfo(id: gid, name: "Class", object: .toilet, color: .violet, createdBy: "_josh")), zone: zone, writer: "_josh"),
+            .upsertFrom(.member(GroupMember(person: store.meRef, role: .member, joinedAt: store.clock())), zone: zone, writer: "_josh")
+        ])
+        XCTAssertEqual(store.my.groupLinks[gid]?.status, .active)
         return (zone, gid)
     }
 
@@ -91,19 +95,19 @@ final class HardeningTests: XCTestCase {
         let clock = TestClock()
         let (store, log) = TestEnv.store(clock: clock)
         let (zone, _) = joinedGroup(store)
-        store.apply([.upsertFrom(.member(GroupMember(person: sam, inbox: "sam-in", role: .member)), zone: zone, writer: "_sam")])
+        store.apply([.upsertFrom(.member(GroupMember(person: sam, role: .member)), zone: zone, writer: "_sam")])
         XCTAssertNotNil(store.cache.zones[zone]?.members["_sam"])
 
-        // Sam rewrites MY member record (e.g. to steal my inbox): rejected, and mine is put back.
+        // Sam rewrites MY member record (e.g. to change my handle): rejected, and mine is put back.
         log.effects.removeAll()
-        var fake = GroupMember(person: store.meRef, inbox: "sam-in", role: .member)
+        var fake = GroupMember(person: store.meRef, role: .member)
         fake.person.handle = "loser"
         store.apply([.upsertFrom(.member(fake), zone: zone, writer: "_sam")])
         XCTAssertEqual(store.cache.zones[zone]?.members["_me"]?.person.handle, store.profile.handle)
         XCTAssertTrue(log.saves.contains(.member(zone, "_me")))
 
         // Sam can't make himself owner either.
-        store.apply([.upsertFrom(.member(GroupMember(person: sam, inbox: "sam-in", role: .owner)), zone: zone, writer: "_sam")])
+        store.apply([.upsertFrom(.member(GroupMember(person: sam, role: .owner)), zone: zone, writer: "_sam")])
         XCTAssertEqual(store.cache.zones[zone]?.members["_sam"]?.role, .member)
     }
 
@@ -141,7 +145,7 @@ final class HardeningTests: XCTestCase {
         let clock = TestClock()
         let (store, _) = TestEnv.store(clock: clock)
         let (zone, _) = joinedGroup(store)
-        store.apply([.upsert(.member(GroupMember(person: sam, inbox: "s", role: .member)), zone: zone)])
+        store.apply([.upsert(.member(GroupMember(person: sam, role: .member)), zone: zone)])
         XCTAssertNotNil(store.cache.zones[zone]?.members["_sam"])
     }
 
@@ -168,12 +172,12 @@ final class HardeningTests: XCTestCase {
         let clock = TestClock()
         let (store, log) = TestEnv.store(clock: clock)
         let (zone, gid) = joinedGroup(store)
-        store.apply([.upsertFrom(.member(GroupMember(person: sam, inbox: "s", role: .member)), zone: zone, writer: "_sam")])
+        store.apply([.upsertFrom(.member(GroupMember(person: sam, role: .member)), zone: zone, writer: "_sam")])
         XCTAssertFalse(store.removeMember(gid, member: "_sam"), "not my group")
         XCTAssertFalse(store.renameGroup(gid, name: "Mine now"))
 
         let mine = store.createGroupLocal(name: "Boys", object: .toilet, color: .lime)!
-        store.apply([.upsertFrom(.member(GroupMember(person: sam, inbox: "s", role: .member)), zone: mine.zone, writer: "_sam")])
+        store.apply([.upsertFrom(.member(GroupMember(person: sam, role: .member)), zone: mine.zone, writer: "_sam")])
         clock.advance(5)
         let ge = GroupEvent(id: UUID(), ownerID: "_sam", source: .instant, startedAt: clock.now, endedAt: nil, location: nil, pwmSessionID: nil, partyID: nil)
         store.apply([.upsertFrom(.groupEvent(ge), zone: mine.zone, writer: "_sam")])
@@ -194,7 +198,7 @@ final class GroupFeatureTests: XCTestCase {
     }
 
     private func member(_ id: UserID, joined: Date) -> GroupMember {
-        GroupMember(person: PersonRef(id: id, handle: id, avatar: AvatarSpec(), color: .lime), inbox: id + "-in", role: .member, joinedAt: joined)
+        GroupMember(person: PersonRef(id: id, handle: id, avatar: AvatarSpec(), color: .lime), role: .member, joinedAt: joined)
     }
 
     func testGroupTrophies() {

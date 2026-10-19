@@ -1,0 +1,351 @@
+import Foundation
+
+public extension Store {
+    // MARK: - Invites
+
+    /// The invite to show as QR / share. Reuses one with more than a day left.
+    func currentInvite() -> OutgoingInvite {
+        let now = clock()
+        // Drop expired invites first.
+        let expired = my.invites.values.filter { !$0.isValid(now: now) }.map { $0.token }
+        if !expired.isEmpty {
+            mutateMy { m in for t in expired { m.invites[t] = nil } }
+            emit(expired.map { .delete(.invite($0)) } + [.refreshSubscriptions, .refreshDirectory])
+        }
+        if let existing = my.invites.values.filter({ $0.expiresAt.timeIntervalSince(now) > 24 * 3600 }).max(by: { $0.createdAt < $1.createdAt }) {
+            return existing
+        }
+        let invite = OutgoingInvite(createdAt: now)
+        mutateMy { $0.invites[invite.token] = invite }
+        emit([.save(.invite(invite.token)), .refreshSubscriptions, .refreshDirectory])
+        return invite
+    }
+
+    func friendInvitePayload() -> FriendInvitePayload {
+        let inv = currentInvite()
+        return FriendInvitePayload(handle: profile.handle, color: profile.color, avatar: profile.avatar, token: inv.token, userID: my.userID)
+    }
+
+    /// Invalidate every outstanding invite (e.g. a QR was posted publicly by mistake).
+    func revokeInvites() {
+        let tokens = Array(my.invites.keys)
+        mutateMy { $0.invites = [:] }
+        emit(tokens.map { .delete(.invite($0)) } + [.refreshSubscriptions, .refreshDirectory])
+    }
+
+    func invite(forToken token: String) -> OutgoingInvite? { my.invites[token] }
+
+    // MARK: - Friend requests (A side: someone answered my invite)
+
+    /// Returns false if ignored (blocked, already a friend, duplicate).
+    @discardableResult
+    func receiveFriendRequest(_ req: IncomingFriendRequest) -> Bool {
+        let uid = req.person.id
+        if my.settings.blockedUserIDs.contains(uid) { return false }
+        if uid == my.userID { return false }
+        if let link = friendLink(for: uid), link.status == .active { return false }
+        if my.requests.values.contains(where: { $0.person.id == uid }) {
+            // Keep the newest request payload.
+            mutateMy { m in
+                for (k, v) in m.requests where v.person.id == uid { m.requests[k] = nil }
+                m.requests[req.id] = req
+            }
+            return true
+        }
+        mutateMy { $0.requests[req.id] = req }
+        return true
+    }
+
+    var friendRequests: [IncomingFriendRequest] {
+        my.requests.values.sorted { $0.receivedAt > $1.receivedAt }
+    }
+
+    func dismissRequest(_ id: String) {
+        mutateMy { $0.requests[id] = nil }
+    }
+
+    // MARK: - Friend links
+
+    /// B side: I answered someone's invite. Creates a pending link.
+    @discardableResult
+    func addRequestedLink(invite: FriendInvitePayload) -> FriendLink {
+        let now = clock()
+        if let existing = my.friendLinks.values.first(where: { $0.inviteToken == invite.t && $0.status == .requested }) {
+            return existing
+        }
+        if let uid = invite.u, let existing = friendLink(for: uid), existing.status == .requested {
+            return existing
+        }
+        let person = PersonRef(id: invite.u ?? "", handle: invite.h, avatar: invite.avatar, color: invite.color)
+        let link = FriendLink(userID: invite.u, person: person, status: .requested, inviteToken: invite.t, createdAt: now, updatedAt: now)
+        mutateMy { $0.friendLinks[link.id] = link }
+        emit([.save(.friendLink(link.id)), .refreshSubscriptions, .refreshDirectory])
+        return link
+    }
+
+    func upsertFriendLink(_ link: FriendLink) {
+        // A blocked person never gets a link again, whichever way it arrives (handshake, another
+        // device's stale sync, a retry). Unblocking first is the only way back.
+        if let uid = link.userID, isBlocked(uid) { return }
+        var l = link
+        l.updatedAt = clock()
+        mutateMy { m in
+            // One link per person.
+            if let uid = l.userID {
+                for (k, v) in m.friendLinks where v.userID == uid && k != l.id { m.friendLinks[k] = nil }
+                for (k, v) in m.requests where v.person.id == uid { m.requests[k] = nil }
+            }
+            m.friendLinks[l.id] = l
+        }
+        emit([.save(.friendLink(l.id)), .refreshSubscriptions, .refreshDirectory])
+        if l.status == .active { evaluateAchievements() }
+    }
+
+    /// Removes the friendship locally and purges their cached history.
+    func removeFriendLocal(_ linkID: UUID) {
+        guard let link = my.friendLinks[linkID] else { return }
+        mutateMy { $0.friendLinks[linkID] = nil }
+        if let uid = link.userID { mutateCache { $0.friends[uid] = nil } }
+        emit([.delete(.friendLink(linkID)), .refreshSubscriptions, .refreshDirectory])
+    }
+
+    func setFriendNotify(_ linkID: UUID, _ level: FriendNotifyLevel) {
+        guard var l = my.friendLinks[linkID] else { return }
+        l.notify = level
+        upsertFriendLink(l)
+    }
+
+    /// Blocks a person: drops their request, any friend link (active or mid-handshake) and their cached
+    /// history, and remembers their handle for the Blocked list. Friends-only: group membership is
+    /// untouched (there is no blocking inside groups).
+    func block(_ userID: UserID) {
+        let handle = person(for: userID)?.handle
+            ?? my.requests.values.first(where: { $0.person.id == userID })?.person.handle
+        updateSettings { s in
+            if !s.blockedUserIDs.contains(userID) { s.blockedUserIDs.append(userID) }
+            if let handle, !handle.isEmpty { s.blockedHandles[userID] = handle }
+        }
+        mutateMy { m in for (k, v) in m.requests where v.person.id == userID { m.requests[k] = nil } }
+        let links = my.friendLinks.values.filter { $0.userID == userID }
+        for link in links { removeFriendLocal(link.id) }
+        if !links.isEmpty { emit([.friendZoneGone(userID)]) }
+    }
+
+    func unblock(_ userID: UserID) {
+        updateSettings { s in
+            s.blockedUserIDs.removeAll { $0 == userID }
+            s.blockedHandles[userID] = nil
+        }
+    }
+
+    /// "@sam" for the Blocked list, even after their profile left the cache.
+    func blockedLabel(_ userID: UserID) -> String {
+        if let p = person(for: userID) { return "@" + p.handle }
+        if let h = my.settings.blockedHandles[userID] { return "@" + h }
+        return "Blocked person"
+    }
+
+    func isBlocked(_ userID: UserID) -> Bool { my.settings.blockedUserIDs.contains(userID) }
+
+    /// Cache from a friend's shared Me zone.
+    func friendCache(_ userID: UserID) -> FriendCache? { cache.friends[userID] }
+
+    // MARK: - Groups
+
+    /// Creates the local records for a new group I own. The platform then creates the group space on
+    /// the server (`.ensureZone`), with me as owner and only member and a fresh invite code.
+    func createGroupLocal(name: String, object: GroupObject, color: IdentityColor) -> GroupLink? {
+        guard let uid = my.userID, let clean = ContentFilter.cleanGroupName(name) else { return nil }
+        let now = clock()
+        let id = UUID()
+        let zone = ZoneRef(ownerName: ZoneRef.currentUser, zoneName: ZoneNames.group(id))
+        let link = GroupLink(id: id, zone: zone, isOwner: true, status: .active, nameCache: clean, joinedAt: now, updatedAt: now)
+        let info = GroupInfo(id: id, name: clean, object: object, color: color, createdBy: uid, createdAt: now, updatedAt: now)
+        let member = GroupMember(person: meRef, role: .owner, joinedAt: now, updatedAt: now)
+        mutateMy { $0.groupLinks[id] = link }
+        mutateCache { c in
+            var z = ZoneCache(zone: zone)
+            z.group = info
+            z.members[uid] = member
+            c.zones[zone] = z
+        }
+        var effects: [Effect] = [.ensureZone(zone), .save(.groupLink(id)), .save(.groupInfo(zone)), .save(.member(zone, uid))]
+        effects += backfillGroup(link)
+        effects += [.refreshSubscriptions, .refreshDirectory]
+        emit(effects)
+        return link
+    }
+
+    /// I opened a group link and asked to join: remember the group while the owner decides.
+    @discardableResult
+    func registerGroupRequest(groupID: UUID, ownerID: UserID?, name: String, object: GroupObject, color: IdentityColor) -> GroupLink? {
+        guard my.userID != nil else { return nil }
+        if let existing = my.groupLinks[groupID] { return existing }
+        let now = clock()
+        let zone = ZoneRef.group(groupID, ownerID: ownerID, me: my.userID)
+        // Anyone with the link can ask, so a new member starts quiet: Poop With Me + parties only.
+        // "All activity" (an alert per member poop) is one tap away in the group's settings.
+        let link = GroupLink(id: groupID, zone: zone, isOwner: false, status: .requested, notify: .pwmAndParties, nameCache: name, joinedAt: now, updatedAt: now)
+        mutateMy { $0.groupLinks[groupID] = link }
+        mutateCache { c in
+            if c.zones[zone] == nil {
+                var z = ZoneCache(zone: zone)
+                z.group = GroupInfo(id: groupID, name: name, object: object, color: color, createdBy: ownerID ?? "", inviteCode: "", createdAt: now, updatedAt: now)
+                c.zones[zone] = z
+            }
+        }
+        emit([.save(.groupLink(groupID)), .refreshSubscriptions, .refreshDirectory])
+        return link
+    }
+
+    /// The owner approved me: my member row appeared in the group space.
+    func groupApproved(_ groupID: UUID, joinedAt: Date) {
+        guard var link = my.groupLinks[groupID], link.status == .requested else { return }
+        link.status = .active
+        link.joinedAt = joinedAt
+        link.updatedAt = clock()
+        mutateMy { $0.groupLinks[groupID] = link }
+        var effects: [Effect] = [.save(.groupLink(groupID))]
+        effects += backfillGroup(link)
+        effects += [.refreshSubscriptions, .refreshDirectory]
+        emit(effects)
+    }
+
+    /// My join request is gone without a membership: declined (or the group disappeared).
+    func groupRequestEnded(_ groupID: UUID) {
+        guard let link = my.groupLinks[groupID], link.status == .requested else { return }
+        mutateMy { $0.groupLinks[groupID] = nil }
+        mutateCache { $0.zones[link.zone] = nil }
+        emit([.delete(.groupLink(groupID)), .refreshSubscriptions, .refreshDirectory])
+    }
+
+    var pendingGroupLinks: [GroupLink] {
+        my.groupLinks.values.filter { $0.status == .requested }.sorted { $0.joinedAt > $1.joinedAt }
+    }
+
+    /// Owner only: people waiting to get in.
+    func joinRequests(_ groupID: UUID) -> [GroupJoinRequest] {
+        guard let l = my.groupLinks[groupID], l.isOwner else { return [] }
+        return (cache.zones[l.zone]?.requests.values.map { $0 } ?? []).sorted { $0.createdAt < $1.createdAt }
+    }
+
+    /// Owner only: optimistic local removal of a request; the server's answer (member row or nothing)
+    /// follows. Returns the request so the platform can call the server.
+    @discardableResult
+    func settleJoinRequest(_ groupID: UUID, member uid: UserID) -> GroupJoinRequest? {
+        guard let l = my.groupLinks[groupID], l.isOwner, let req = cache.zones[l.zone]?.requests[uid] else { return nil }
+        mutateCache { $0.zones[l.zone]?.requests[uid] = nil }
+        return req
+    }
+
+    /// Mirrors my poops since I joined this group (used when sharing is switched back on).
+    /// Never earlier: group membership is social access, not personal-history access (handoff §15, rule 11).
+    internal func backfillGroup(_ link: GroupLink) -> [Effect] {
+        guard let uid = my.userID, link.shareEvents, link.status == .active else { return [] }
+        let cutoff = link.joinedAt
+        let recent = my.events.values.filter { $0.startedAt >= cutoff && $0.sharedToGroups }
+        guard !recent.isEmpty else { return [] }
+        mutateCache { c in
+            if c.zones[link.zone] == nil { c.zones[link.zone] = ZoneCache(zone: link.zone) }
+            for e in recent { c.zones[link.zone]?.events[e.id] = GroupEvent(event: e, ownerID: uid, includeLocation: link.shareLocations) }
+        }
+        return recent.map { .save(.groupEvent(link.zone, $0.id)) }
+    }
+
+    func setGroupPrefs(_ groupID: UUID, notify: GroupNotifyLevel? = nil, shareEvents: Bool? = nil, shareLocations: Bool? = nil) {
+        guard var l = my.groupLinks[groupID] else { return }
+        let locationChanged = shareLocations != nil && shareLocations != l.shareLocations
+        let sharingChanged = shareEvents != nil && shareEvents != l.shareEvents
+        if let n = notify { l.notify = n }
+        if let s = shareEvents { l.shareEvents = s }
+        if let s = shareLocations { l.shareLocations = s }
+        l.updatedAt = clock()
+        mutateMy { $0.groupLinks[groupID] = l }
+        var effects: [Effect] = [.save(.groupLink(groupID)), .refreshSubscriptions, .refreshDirectory, .rescheduleSummaries]
+        if locationChanged || sharingChanged, l.status == .active, let uid = my.userID {
+            // Re-mirror (adds/removes locations, or adds/removes events) for my events already in the group.
+            let mine = cache.zones[l.zone]?.events.values.filter { $0.ownerID == uid } ?? []
+            if l.shareEvents {
+                effects += backfillGroup(l)
+                for ge in mine where my.events[ge.id] != nil {
+                    if let e = my.events[ge.id] {
+                        let updated = GroupEvent(event: e, ownerID: uid, includeLocation: l.shareLocations)
+                        mutateCache { $0.zones[l.zone]?.events[ge.id] = updated }
+                        effects.append(.save(.groupEvent(l.zone, ge.id)))
+                    }
+                }
+            } else {
+                for ge in mine {
+                    mutateCache { $0.zones[l.zone]?.events[ge.id] = nil }
+                    effects.append(.delete(.groupEvent(l.zone, ge.id)))
+                }
+            }
+        }
+        emit(effects)
+    }
+
+    /// Removes my membership locally. The platform tells the server (leave, or delete if I own it).
+    func removeGroupLocal(_ groupID: UUID) {
+        guard let l = my.groupLinks[groupID] else { return }
+        var effects: [Effect] = [.delete(.groupLink(groupID))]
+        if !l.isOwner, let uid = my.userID {
+            // Clean up what I wrote into their space before leaving.
+            let mine = cache.zones[l.zone]?.events.values.filter { $0.ownerID == uid }.map { $0.id } ?? []
+            effects += mine.map { .delete(.groupEvent(l.zone, $0)) }
+            effects.append(.delete(.member(l.zone, uid)))
+        }
+        mutateMy { $0.groupLinks[groupID] = nil }
+        mutateCache { $0.zones[l.zone] = nil }
+        emit(effects + [.refreshSubscriptions, .refreshDirectory])
+    }
+
+    func renameGroup(_ groupID: UUID, name: String, object: GroupObject? = nil, color: IdentityColor? = nil) -> Bool {
+        guard let l = my.groupLinks[groupID], l.isOwner, var info = cache.zones[l.zone]?.group, let clean = ContentFilter.cleanGroupName(name) else { return false }
+        info.name = clean
+        if let o = object { info.object = o }
+        if let c = color { info.color = c }
+        info.updatedAt = clock()
+        let updated = info
+        mutateCache { $0.zones[l.zone]?.group = updated }
+        var link = l
+        link.nameCache = clean
+        mutateMy { $0.groupLinks[groupID] = link }
+        emit([.save(.groupInfo(l.zone)), .save(.groupLink(groupID)), .refreshDirectory])
+        return true
+    }
+
+    /// Owner only: removes a member's records locally (the platform kicks them on the server, where
+    /// they are also banned from rejoining with the link). Their poop copies go too.
+    @discardableResult
+    func removeMember(_ groupID: UUID, member uid: UserID) -> Bool {
+        guard let l = my.groupLinks[groupID], l.isOwner, uid != my.userID, cache.zones[l.zone]?.members[uid] != nil else { return false }
+        let theirEvents = cache.zones[l.zone]?.events.values.filter { $0.ownerID == uid }.map(\.id) ?? []
+        mutateCache { c in
+            c.zones[l.zone]?.members[uid] = nil
+            for id in theirEvents { c.zones[l.zone]?.events[id] = nil }
+        }
+        emit([.delete(.member(l.zone, uid))] + theirEvents.map { .delete(.groupEvent(l.zone, $0)) } + [.refreshSubscriptions, .refreshDirectory])
+        return true
+    }
+
+    // MARK: - Ad-hoc spaces
+
+    func registerSpace(_ link: SpaceLink) {
+        mutateMy { $0.spaceLinks[link.zone] = link }
+        mutateCache { c in if c.zones[link.zone] == nil { c.zones[link.zone] = ZoneCache(zone: link.zone) } }
+        emit([.save(.spaceLink(link.zone))])
+    }
+
+    func removeSpace(_ zone: ZoneRef) {
+        archiveSessions(in: zone)
+        mutateMy { $0.spaceLinks[zone] = nil }
+        mutateCache { $0.zones[zone] = nil }
+        emit([.delete(.spaceLink(zone))])
+    }
+
+    /// Spaces past their expiry; the service deletes (owner) or leaves (participant) them.
+    func expiredSpaces(now: Date? = nil) -> [SpaceLink] {
+        let n = now ?? clock()
+        return my.spaceLinks.values.filter { $0.expiresAt < n }
+    }
+}
